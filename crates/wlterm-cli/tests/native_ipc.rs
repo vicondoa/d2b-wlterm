@@ -1,6 +1,6 @@
 use d2b_toolkit_core::{
-    PublicRequest, PublicResponse, ShellListEntry, ShellListResult, ShellName, ShellOp,
-    ShellOpResponse, ShellSessionState,
+    FeatureFlag, HelloOk, HelloResponse, PublicRequest, PublicResponse, ShellListEntry,
+    ShellListResult, ShellName, ShellOp, ShellOpResponse, ShellSessionState, Version,
 };
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -75,6 +75,21 @@ fn cli_list_uses_real_public_socket_frames() {
 
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept cli");
+
+        let hello = read_frame(&mut stream);
+        let hello: serde_json::Value = serde_json::from_slice(&hello).expect("hello json");
+        assert_eq!(
+            hello.get("type").and_then(serde_json::Value::as_str),
+            Some("hello")
+        );
+        write_json_frame(
+            &mut stream,
+            &HelloResponse::HelloOk(HelloOk {
+                server_version: Version::new("0.4.0"),
+                selected_version: Version::new("0.4.0"),
+                capabilities: vec![FeatureFlag::new("typed-errors")],
+            }),
+        );
 
         let request = read_frame(&mut stream);
         let request: PublicRequest = serde_json::from_slice(&request).expect("public request");
