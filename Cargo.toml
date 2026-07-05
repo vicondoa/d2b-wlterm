@@ -1,0 +1,23 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.78"
+repository = "https://github.com/vicondoa/d2b-wlterm"
+
+[workspace.dependencies]
+wlterm-core = { path = "crates/wlterm-core" }
+wlterm-d2b = { path = "crates/wlterm-d2b" }
+wlterm-waybar = { path = "crates/wlterm-waybar" }
+wlterm-ui = { path = "crates/wlterm-ui" }
+petname = "2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# TODO(d2b-toolkit): once github.com/vicondoa/d2b-toolkit is available in
+# /home/paydro/projects/d2b-toolkit, wire the relevant crate here as a local
+# path dependency and replace the wlterm-d2b transport stub.
+# d2b-toolkit = { path = "../d2b-toolkit/crates/d2b-toolkit" }

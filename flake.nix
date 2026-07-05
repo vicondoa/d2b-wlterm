@@ -1,0 +1,79 @@
+{
+  description = "Wayland terminal launcher companion for d2b";
+
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+  outputs = { self, nixpkgs }:
+    let
+      systems = [ "x86_64-linux" "aarch64-linux" ];
+      forAllSystems = nixpkgs.lib.genAttrs systems;
+    in
+    {
+      packages = forAllSystems (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        {
+          default = pkgs.rustPlatform.buildRustPackage {
+            pname = "d2b-wlterm";
+            version = "0.1.0-dev";
+            src = pkgs.lib.cleanSource ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [ "-p" "wlterm-cli" ];
+            cargoTestFlags = [ "--workspace" ];
+            meta = {
+              description = "Wayland terminal launcher companion for d2b";
+              homepage = "https://github.com/vicondoa/d2b-wlterm";
+              license = pkgs.lib.licenses.asl20;
+              mainProgram = "d2b-wlterm";
+            };
+          };
+        });
+
+      checks = forAllSystems (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          hmEval = pkgs.lib.evalModules {
+            specialArgs = { inherit pkgs; };
+            modules = [
+              ({ lib, ... }: {
+                options.assertions = lib.mkOption {
+                  type = lib.types.listOf lib.types.anything;
+                  default = [ ];
+                };
+                options.home.packages = lib.mkOption {
+                  type = lib.types.listOf lib.types.package;
+                  default = [ ];
+                };
+                options.xdg.configFile = lib.mkOption {
+                  type = lib.types.attrsOf lib.types.anything;
+                  default = { };
+                };
+              })
+              (import ./nix/home-manager.nix { inherit self; })
+              {
+                programs.d2b-wlterm.enable = true;
+                programs.d2b-wlterm.waybar.enable = true;
+              }
+            ];
+          };
+        in {
+          package = self.packages.${system}.default;
+          home-manager-module = pkgs.runCommand "d2b-wlterm-home-manager-module" { } ''
+            test -n "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
+            test -n "${hmEval.config.xdg.configFile."d2b-wlterm/waybar-module.json".text}"
+            touch $out
+          '';
+        });
+
+      devShells = forAllSystems (system:
+        let pkgs = import nixpkgs { inherit system; };
+        in {
+          default = pkgs.mkShell {
+            packages = with pkgs; [ cargo clippy rustc rustfmt nixpkgs-fmt ];
+          };
+        });
+
+      homeManagerModules.default = import ./nix/home-manager.nix { inherit self; };
+    };
+}

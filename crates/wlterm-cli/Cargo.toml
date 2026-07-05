@@ -1,0 +1,17 @@
+[package]
+name = "wlterm-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "d2b-wlterm"
+path = "src/main.rs"
+
+[dependencies]
+wlterm-core.workspace = true
+wlterm-d2b.workspace = true
+wlterm-waybar.workspace = true
+wlterm-ui.workspace = true
