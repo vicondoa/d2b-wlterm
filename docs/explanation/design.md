@@ -25,3 +25,8 @@ The d2b adapter crate consumes shared toolkit DTOs and `d2b-client` to execute
 planned shell list, attach, disconnect, and kill actions over the public daemon
 socket. It refuses privileged broker paths, does not invoke subprocess bridges
 for shell attach/open, and keeps offline VM actions disabled in the planner.
+
+WeezTerm integration is deliberately a command boundary, not a privileged
+control-plane dependency. `d2b-wlterm` chooses which terminal command to launch
+from config, and WeezTerm's native d2b provider, when used, speaks the same
+public daemon socket through the shared toolkit crates.

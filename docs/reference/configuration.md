@@ -43,3 +43,11 @@ Control-center state is frontend-neutral JSON for Quickshell or similar shells.
 It contains VM cards, sanitized shell labels, available actions, active-shell
 counts, and safe async-error render data. Labels strip control and ANSI escape
 characters, truncate long text, and use `unnamed-shell` for empty labels.
+
+## Flake/Home Manager coverage
+
+The Home Manager module renders this TOML shape directly. The flake exports a
+`checks.<system>.home-manager-module` evaluation check that enables the module,
+sets `defaultOpenBehavior = "force-open"`, enables Waybar output, and asserts
+that the generated config still contains the `wezterm_command`, UI, and Waybar
+keys documented here.

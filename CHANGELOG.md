@@ -9,6 +9,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Documented flake input alignment for d2b, d2b-toolkit, d2b-wlterm, and
+  WeezTerm, including Home Manager wiring and the flake check that evaluates the
+  rendered module output.
 - Initial Rust/Nix workspace skeleton with core, d2b, Waybar, UI, and CLI crates.
 - Home Manager module scaffold for package installation, config rendering, and Waybar integration.
 - Deterministic friendly-name generator and model stubs for planned terminal lifecycle behavior.

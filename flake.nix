@@ -82,6 +82,7 @@
               {
                 programs.d2b-wlterm.enable = true;
                 programs.d2b-wlterm.defaultOpenBehavior = "force-open";
+                programs.d2b-wlterm.weztermCommand = [ "weezterm" "start" "--" ];
                 programs.d2b-wlterm.waybar.enable = true;
                 programs.d2b-wlterm.quickshell.enable = true;
                 programs.waybar.enable = true;
@@ -93,6 +94,8 @@
           package = self.packages.${system}.default;
           home-manager-module = pkgs.runCommand "d2b-wlterm-home-manager-module" { } ''
             test -n "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
+            grep -q 'wezterm_command = \[' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
+            grep -q '"weezterm"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q 'default_open_behavior = "force-open"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q 'module_name = "custom/d2b-wlterm"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q 'control_center_state_path = "$XDG_RUNTIME_DIR/d2b-wlterm/control-center.json"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"

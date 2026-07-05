@@ -35,6 +35,46 @@ cargo clippy --workspace --all-targets -- -D warnings
 nix flake check
 ```
 
+## Flake inputs
+
+Use one `nixpkgs` input across d2b, the toolkit, and this launcher. If you also
+use the WeezTerm flake, make it follow the same toolkit input:
+
+```nix
+{ inputs, pkgs, ... }:
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+    d2b = {
+      url = "github:vicondoa/d2b";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    d2b-toolkit = {
+      url = "github:vicondoa/d2b-toolkit";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    d2b-wlterm = {
+      url = "github:vicondoa/d2b-wlterm";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.d2b-toolkit.follows = "d2b-toolkit";
+    };
+
+    weezterm = {
+      url = "github:vicondoa/weezterm";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.d2b-toolkit.follows = "d2b-toolkit";
+    };
+  };
+}
+```
+
+The flake exports `packages.${system}.default`,
+`homeManagerModules.default`, and a `checks.${system}.home-manager-module`
+evaluation check for the rendered Home Manager config and Waybar snippet.
+
 ## Home Manager
 
 ```nix
@@ -44,7 +84,11 @@ nix flake check
   programs.d2b-wlterm = {
     enable = true;
     publicSocketPath = "$XDG_RUNTIME_DIR/d2b/public.sock";
-    weztermCommand = [ "wezterm" "start" "--" ];
+    weztermCommand = [
+      "${inputs.weezterm.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/weezterm"
+      "start"
+      "--"
+    ];
     waybar.enable = true;
     quickshell.enable = true;
   };
