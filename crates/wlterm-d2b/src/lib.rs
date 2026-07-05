@@ -41,9 +41,7 @@ impl Default for D2bClientConfig {
 }
 
 fn default_public_socket_path() -> String {
-    std::env::var("XDG_RUNTIME_DIR")
-        .map(|dir| format!("{dir}/d2b/public.sock"))
-        .unwrap_or_else(|_| "/run/d2b/public.sock".to_string())
+    std::env::var("D2B_PUBLIC_SOCKET").unwrap_or_else(|_| "/run/d2b/public.sock".to_string())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -979,6 +977,14 @@ mod tests {
         };
         assert_eq!(err.kind(), &D2bClientErrorKind::AuthDenied);
         assert!(!err.to_string().contains("priv-broker.sock"));
+    }
+
+    #[test]
+    fn default_client_uses_public_daemon_socket() {
+        assert_eq!(
+            D2bClientConfig::default().public_socket_path,
+            "/run/d2b/public.sock"
+        );
     }
 
     #[test]

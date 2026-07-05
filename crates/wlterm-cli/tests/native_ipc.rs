@@ -113,7 +113,7 @@ fn cli_list_uses_real_public_socket_frames() {
     });
 
     let output = Command::new(env!("CARGO_BIN_EXE_d2b-wlterm"))
-        .env("XDG_RUNTIME_DIR", runtime_dir.path())
+        .env("D2B_PUBLIC_SOCKET", &socket_path)
         .arg("list")
         .arg("work")
         .output()

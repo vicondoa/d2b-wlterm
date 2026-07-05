@@ -94,6 +94,7 @@
           package = self.packages.${system}.default;
           home-manager-module = pkgs.runCommand "d2b-wlterm-home-manager-module" { } ''
             test -n "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
+            grep -q 'public_socket_path = "/run/d2b/public.sock"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q 'wezterm_command = \[' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q '"weezterm"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q 'default_open_behavior = "force-open"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"

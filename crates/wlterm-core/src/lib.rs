@@ -32,9 +32,7 @@ impl Default for Config {
 }
 
 fn default_public_socket_path() -> String {
-    std::env::var("XDG_RUNTIME_DIR")
-        .map(|dir| format!("{dir}/d2b/public.sock"))
-        .unwrap_or_else(|_| "/run/d2b/public.sock".to_string())
+    std::env::var("D2B_PUBLIC_SOCKET").unwrap_or_else(|_| "/run/d2b/public.sock".to_string())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -693,6 +691,7 @@ mod tests {
     #[test]
     fn default_config_exposes_safe_behavior_and_serializes_shape() {
         let cfg = Config::default();
+        assert_eq!(cfg.public_socket_path, "/run/d2b/public.sock");
         assert_eq!(cfg.refresh_interval_seconds, 5);
         assert_eq!(cfg.ui.default_open_behavior, OpenBehavior::FocusExisting);
         assert!(cfg.ui.stop_confirmation);
