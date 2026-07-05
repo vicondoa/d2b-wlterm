@@ -18,3 +18,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Public d2b client execution boundary for shell list, open/create attach,
   disconnect-only close, and confirmed Stop-to-kill actions with redacted
   trace/correlation errors.
+- Waybar status JSON, control-center state JSON, and Home Manager Waybar
+  injection with sanitized labels, active-shell counts, disabled VM state,
+  already-attached fallbacks, manual create-name prompts, and safe async-error
+  rendering.

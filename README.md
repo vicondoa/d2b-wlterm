@@ -1,8 +1,9 @@
 # d2b-wlterm
 
-`d2b-wlterm` is the planned Wayland terminal launcher surface for d2b. This repository currently contains core VM/session models, a d2b toolkit
-adapter boundary, Waybar output helpers, UI state concepts, a CLI binary, and a
-Home Manager module scaffold.
+`d2b-wlterm` is the planned Wayland terminal launcher surface for d2b. This
+repository currently contains core VM/session models, a d2b toolkit adapter
+boundary, Waybar output helpers, UI state concepts, a CLI binary, and a Home
+Manager module.
 
 ## Current status
 
@@ -14,8 +15,11 @@ Implemented:
 - Stop confirmation, already-attached Open, and async error-display models;
 - `d2b-wlterm` CLI with public-socket shell list, open/create, and
   confirmed stop commands;
-- `homeManagerModules.default` with package install, `config.toml` rendering, and
-  Waybar module-file rendering;
+- `homeManagerModules.default` with package install, `config.toml` rendering,
+  Waybar integration, and a Quickshell control-center state surface;
+- safe UI rendering for shell labels, manual create-name prompts,
+  already-attached fallbacks, and async errors with bounded digest/correlation
+  details;
 - a local `d2b-toolkit`/`d2b-client` boundary for public daemon shell actions.
 
 The d2b integration crate uses only the public daemon socket. Stop dispatches a
@@ -40,8 +44,9 @@ nix flake check
   programs.d2b-wlterm = {
     enable = true;
     publicSocketPath = "$XDG_RUNTIME_DIR/d2b/public.sock";
-    weztermCommand = [ "weezterm" "start" "--" ];
+    weztermCommand = [ "wezterm" "start" "--" ];
     waybar.enable = true;
+    quickshell.enable = true;
   };
 }
 ```

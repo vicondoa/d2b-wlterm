@@ -2,9 +2,12 @@ use std::env;
 use std::process::ExitCode;
 
 use wlterm_core::friendly_name::FriendlyName;
-use wlterm_core::{AsyncErrorDisplay, Config, OpenBehavior, PlannedAction, SessionId, VmId};
+use wlterm_core::{AsyncErrorDisplay, Config, Model, OpenBehavior, PlannedAction, SessionId, VmId};
 use wlterm_d2b::{D2bActionBoundary, D2bActionOutcome};
-use wlterm_ui::{decide_open, AsyncErrorEvent, OpenDecision, StopRequest};
+use wlterm_ui::{
+    decide_open, AlreadyAttachedNotice, AsyncErrorEvent, ControlCenterState, OpenDecision,
+    RenderedAsyncError, ShellNamePrompt, StopRequest,
+};
 use wlterm_waybar::WaybarStatus;
 
 fn main() -> ExitCode {
@@ -39,7 +42,14 @@ fn run(args: Vec<String>) -> Result<String, String> {
                     .to_string())
             }
         }
-        Some("waybar") => Ok(WaybarStatus::idle().to_json()),
+        Some("waybar") => Ok(WaybarStatus::from_model(&Model::new(Config::default())).to_json()),
+        Some("state") | Some("control-center") | Some("quickshell") => {
+            Ok(ControlCenterState::empty().to_json())
+        }
+        Some("prompt-name") => {
+            Ok(ShellNamePrompt::new(args.get(1).map_or("", String::as_str)).to_json())
+        }
+        Some("already-attached") => render_already_attached(args.get(1)),
         Some("list") => run_list(args.get(1)),
         Some("create") => run_create(args.get(1), args.get(2)),
         Some("open") if args.get(1).is_some() => run_open(
@@ -71,7 +81,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
 }
 
 fn help() -> String {
-    "d2b-wlterm\n\nCommands:\n  name [seed]\n  waybar\n  list <vm>\n  create <vm> [shell]\n  open <vm> <shell> [--force]\n  stop <vm> <shell> --confirm\n  config\n  async-error".to_string()
+    "d2b-wlterm\n\nCommands:\n  name [seed]\n  waybar\n  state|control-center|quickshell\n  prompt-name [shell]\n  already-attached [focus-existing|prompt|force-open]\n  list <vm>\n  create <vm> [shell]\n  open <vm> <shell> [--force]\n  stop <vm> <shell> --confirm\n  config\n  async-error".to_string()
 }
 
 fn run_list(vm: Option<&String>) -> Result<String, String> {
@@ -164,7 +174,7 @@ fn parse_shell_name(value: Option<&String>) -> Result<FriendlyName, String> {
 fn default_config_toml() -> String {
     let cfg = Config::default();
     format!(
-        "public_socket_path = \"{}\"\nwezterm_command = [{}]\nrefresh_interval_seconds = {}\n\n[ui]\ndefault_open_behavior = \"focus-existing\"\nstop_confirmation = {}\nasync_error_display = \"notification\"\n\n[waybar]\nenable = {}\nmodule_name = \"{}\"",
+        "public_socket_path = \"{}\"\nwezterm_command = [{}]\nrefresh_interval_seconds = {}\n\n[ui]\ndefault_open_behavior = \"focus-existing\"\nstop_confirmation = {}\nasync_error_display = \"notification\"\n\n[waybar]\nenable = {}\nmodule_name = \"{}\"\n\n[quickshell]\nenable = false\ncontrol_center_state_path = \"$XDG_RUNTIME_DIR/d2b-wlterm/control-center.json\"",
         cfg.public_socket_path,
         cfg.wezterm_command
             .iter()
@@ -195,16 +205,24 @@ fn render_stop_request(request: &StopRequest) -> String {
 }
 
 fn render_async_error(event: &AsyncErrorEvent) -> String {
-    let display = match event.display {
-        AsyncErrorDisplay::Inline => "inline",
-        AsyncErrorDisplay::Notification => "notification",
-        AsyncErrorDisplay::Waybar => "waybar",
-        AsyncErrorDisplay::Silent => "silent",
+    match RenderedAsyncError::from_event(event) {
+        Some(rendered) => rendered.detail,
+        None => "async-error render=false".to_string(),
+    }
+}
+
+fn render_already_attached(value: Option<&String>) -> Result<String, String> {
+    let behavior = match value.map(String::as_str).unwrap_or("focus-existing") {
+        "focus-existing" => OpenBehavior::FocusExisting,
+        "prompt" => OpenBehavior::Prompt,
+        "force-open" => OpenBehavior::ForceOpen,
+        other => return Err(format!("unknown already-attached behavior '{other}'")),
     };
-    format!(
-        "async-error render={} display={display}",
-        event.should_render()
-    )
+    let notice = AlreadyAttachedNotice::for_behavior("default", behavior);
+    Ok(format!(
+        "{} allow_force_open={}",
+        notice.mode, notice.allow_force_open
+    ))
 }
 
 #[cfg(test)]

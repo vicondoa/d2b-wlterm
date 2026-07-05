@@ -15,16 +15,18 @@ pub struct Config {
     pub refresh_interval_seconds: u64,
     pub ui: UiConfig,
     pub waybar: WaybarConfig,
+    pub quickshell: QuickshellConfig,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             public_socket_path: default_public_socket_path(),
-            wezterm_command: vec!["weezterm".into(), "start".into(), "--".into()],
+            wezterm_command: vec!["wezterm".into(), "start".into(), "--".into()],
             refresh_interval_seconds: 5,
             ui: UiConfig::default(),
             waybar: WaybarConfig::default(),
+            quickshell: QuickshellConfig::default(),
         }
     }
 }
@@ -65,6 +67,23 @@ impl Default for WaybarConfig {
         Self {
             enable: false,
             module_name: "custom/d2b-wlterm".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct QuickshellConfig {
+    pub enable: bool,
+    pub control_center_state_path: String,
+}
+
+impl Default for QuickshellConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            control_center_state_path: "$XDG_RUNTIME_DIR/d2b-wlterm/control-center.json"
+                .to_string(),
         }
     }
 }
@@ -679,6 +698,7 @@ mod tests {
         assert!(cfg.ui.stop_confirmation);
         assert_eq!(cfg.ui.async_error_display, AsyncErrorDisplay::Notification);
         assert!(!cfg.waybar.enable);
+        assert!(!cfg.quickshell.enable);
 
         let rendered = serde_json::to_string(&cfg).expect("config serializes");
         let roundtrip: Config = serde_json::from_str(&rendered).expect("config deserializes");
@@ -687,6 +707,10 @@ mod tests {
             OpenBehavior::FocusExisting
         );
         assert_eq!(roundtrip.waybar.module_name, "custom/d2b-wlterm");
+        assert_eq!(
+            roundtrip.quickshell.control_center_state_path,
+            "$XDG_RUNTIME_DIR/d2b-wlterm/control-center.json"
+        );
     }
 
     #[test]

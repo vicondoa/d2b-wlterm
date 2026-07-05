@@ -14,6 +14,7 @@ Add the flake input and import the module:
           programs.d2b-wlterm.enable = true;
           programs.d2b-wlterm.defaultOpenBehavior = "focus-existing";
           programs.d2b-wlterm.waybar.enable = true;
+          programs.d2b-wlterm.quickshell.enable = true;
         }
       ];
     };
@@ -21,9 +22,13 @@ Add the flake input and import the module:
 }
 ```
 
-The module installs the package, renders `d2b-wlterm/config.toml`, and can render
-a Waybar module snippet at `d2b-wlterm/waybar-module.json`. Use
-`defaultOpenBehavior = "prompt"` or `"force-open"` if focusing an existing
+The module installs the package, renders `d2b-wlterm/config.toml`, can render a
+Waybar module snippet at `d2b-wlterm/waybar-module.json`, and injects the custom
+Waybar module when Home Manager also manages Waybar. Enable
+`quickshell.enable` to render the control-center surface description at
+`d2b-wlterm/quickshell-control-center.json`.
+
+Use `defaultOpenBehavior = "prompt"` or `"force-open"` if focusing an existing
 attached terminal should not be the default. Use `asyncErrorDisplay = "inline"`
 when a frontend should render delayed d2b client failures inline instead of as a
 notification or Waybar state.

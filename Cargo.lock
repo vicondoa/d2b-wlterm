@@ -592,6 +592,9 @@ dependencies = [
 name = "wlterm-ui"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
  "wlterm-core",
 ]
 
@@ -602,6 +605,7 @@ dependencies = [
  "serde",
  "serde_json",
  "wlterm-core",
+ "wlterm-ui",
 ]
 
 [[package]]
