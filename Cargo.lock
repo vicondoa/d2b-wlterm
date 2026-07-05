@@ -559,7 +559,10 @@ dependencies = [
 name = "wlterm-cli"
 version = "0.1.0"
 dependencies = [
+ "d2b-toolkit-core",
  "futures",
+ "serde",
+ "serde_json",
  "wlterm-core",
  "wlterm-d2b",
  "wlterm-ui",

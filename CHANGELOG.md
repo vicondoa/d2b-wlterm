@@ -22,3 +22,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   injection with sanitized labels, active-shell counts, disabled VM state,
   already-attached fallbacks, manual create-name prompts, and safe async-error
   rendering.
+- Native CLI integration coverage that drives `d2b-wlterm list` over a real
+  AF_UNIX public-socket frame exchange instead of a fake in-memory transport.
+
+### Changed
+
+- Nix flake packaging consumes `d2b-toolkit` from a GitHub flake input with
+  `nixpkgs` following the caller, avoiding developer-local absolute paths.

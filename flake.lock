@@ -2,17 +2,23 @@
   "nodes": {
     "d2b-toolkit": {
       "inputs": {
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": [
+          "nixpkgs"
+        ]
       },
       "locked": {
-        "lastModified": 1783277715,
-        "narHash": "sha256-DdT/YuJqp2aR3I7ZxrwxqnkvacWdP4S7GcU9sYuGJVo=",
-        "path": "/home/paydro/projects/d2b-toolkit",
-        "type": "path"
+        "lastModified": 1783281408,
+        "narHash": "sha256-TO1aDZnvHGB0kodpbyGPwSAhwFtV2rv0FQj3pUZQR/g=",
+        "owner": "vicondoa",
+        "repo": "d2b-toolkit",
+        "rev": "e93b17ab7fcce8a5a9f232c3c411f8082e56b706",
+        "type": "github"
       },
       "original": {
-        "path": "/home/paydro/projects/d2b-toolkit",
-        "type": "path"
+        "owner": "vicondoa",
+        "ref": "terminal-integration-toolkit",
+        "repo": "d2b-toolkit",
+        "type": "github"
       }
     },
     "nixpkgs": {
@@ -31,26 +37,10 @@
         "type": "github"
       }
     },
-    "nixpkgs_2": {
-      "locked": {
-        "lastModified": 1783224372,
-        "narHash": "sha256-8i/87eeoqiGE4yOTjwSA3Eh/ziJRQEmd/unYU+K27sk=",
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "d407951447dcd00442e97087bf374aad70c04cea",
-        "type": "github"
-      },
-      "original": {
-        "owner": "NixOS",
-        "ref": "nixos-unstable",
-        "repo": "nixpkgs",
-        "type": "github"
-      }
-    },
     "root": {
       "inputs": {
         "d2b-toolkit": "d2b-toolkit",
-        "nixpkgs": "nixpkgs_2"
+        "nixpkgs": "nixpkgs"
       }
     }
   },

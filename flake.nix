@@ -1,8 +1,13 @@
 {
   description = "Wayland terminal launcher companion for d2b";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  inputs.d2b-toolkit.url = "path:/home/paydro/projects/d2b-toolkit";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    d2b-toolkit = {
+      url = "github:vicondoa/d2b-toolkit/terminal-integration-toolkit";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
 
   outputs = { self, nixpkgs, d2b-toolkit }:
     let
