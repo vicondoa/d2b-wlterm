@@ -7,8 +7,12 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+d2b-client.workspace = true
+d2b-toolkit-core.workspace = true
+futures.workspace = true
+sha2.workspace = true
 wlterm-core.workspace = true
 
-# TODO(d2b-toolkit): prefer a local path dependency when the sibling toolkit
-# repository exists, for example:
-# d2b-toolkit = { path = "../../../d2b-toolkit/crates/d2b-toolkit" }
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true

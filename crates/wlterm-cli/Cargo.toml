@@ -11,7 +11,13 @@ name = "d2b-wlterm"
 path = "src/main.rs"
 
 [dependencies]
+futures.workspace = true
 wlterm-core.workspace = true
 wlterm-d2b.workspace = true
 wlterm-waybar.workspace = true
 wlterm-ui.workspace = true
+
+[dev-dependencies]
+d2b-toolkit-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
