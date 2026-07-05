@@ -24,4 +24,6 @@ Add the flake input and import the module:
 The module installs the package, renders `d2b-wlterm/config.toml`, and can render
 a Waybar module snippet at `d2b-wlterm/waybar-module.json`. Use
 `defaultOpenBehavior = "prompt"` or `"force-open"` if focusing an existing
-attached terminal should not be the default.
+attached terminal should not be the default. Use `asyncErrorDisplay = "inline"`
+when a frontend should render delayed d2b client failures inline instead of as a
+notification or Waybar state.

@@ -2,7 +2,8 @@ use std::env;
 use std::process::ExitCode;
 
 use wlterm_core::friendly_name::FriendlyName;
-use wlterm_core::{AsyncErrorDisplay, Config, OpenBehavior, SessionId};
+use wlterm_core::{AsyncErrorDisplay, Config, OpenBehavior, PlannedAction, SessionId, VmId};
+use wlterm_d2b::{D2bActionBoundary, D2bActionOutcome};
 use wlterm_ui::{decide_open, AsyncErrorEvent, OpenDecision, StopRequest};
 use wlterm_waybar::WaybarStatus;
 
@@ -39,20 +40,27 @@ fn run(args: Vec<String>) -> Result<String, String> {
             }
         }
         Some("waybar") => Ok(WaybarStatus::idle().to_json()),
-        Some("open") => {
-            let session = SessionId::new(args.get(1).map(String::as_str).unwrap_or("default"))
-                .map_err(|_| "session id must not be empty".to_string())?;
-            Ok(render_open_decision(decide_open(
-                &session,
-                true,
-                OpenBehavior::FocusExisting,
-            )))
-        }
-        Some("stop") => {
-            let session = SessionId::new(args.get(1).map(String::as_str).unwrap_or("default"))
-                .map_err(|_| "session id must not be empty".to_string())?;
-            Ok(render_stop_request(&StopRequest::new(&session, true)))
-        }
+        Some("list") => run_list(args.get(1)),
+        Some("create") => run_create(args.get(1), args.get(2)),
+        Some("open") if args.get(1).is_some() => run_open(
+            args.get(1),
+            args.get(2),
+            args.iter().any(|arg| arg == "--force"),
+        ),
+        Some("open") => Ok(render_open_decision(decide_open(
+            &SessionId::new("default").map_err(|_| "session id must not be empty".to_string())?,
+            true,
+            OpenBehavior::FocusExisting,
+        ))),
+        Some("stop") if args.get(1).is_some() => run_stop(
+            args.get(1),
+            args.get(2),
+            args.iter().any(|arg| arg == "--confirm"),
+        ),
+        Some("stop") => Ok(render_stop_request(&StopRequest::new(
+            &SessionId::new("default").map_err(|_| "session id must not be empty".to_string())?,
+            true,
+        ))),
         Some("config") => Ok(default_config_toml()),
         Some("async-error") => Ok(render_async_error(&AsyncErrorEvent::new(
             "example async error",
@@ -63,7 +71,94 @@ fn run(args: Vec<String>) -> Result<String, String> {
 }
 
 fn help() -> String {
-    "d2b-wlterm skeleton\n\nCommands:\n  name [seed]\n  waybar\n  open [session]\n  stop [session]\n  config\n  async-error".to_string()
+    "d2b-wlterm\n\nCommands:\n  name [seed]\n  waybar\n  list <vm>\n  create <vm> [shell]\n  open <vm> <shell> [--force]\n  stop <vm> <shell> --confirm\n  config\n  async-error".to_string()
+}
+
+fn run_list(vm: Option<&String>) -> Result<String, String> {
+    let vm = parse_vm(vm)?;
+    let outcome = D2bActionBoundary::new(Default::default())
+        .execute_blocking(PlannedAction::ListSessions { vm })
+        .map_err(|err| err.to_string())?;
+    let D2bActionOutcome::Listed { sessions, .. } = outcome else {
+        return Err("unexpected list result".to_string());
+    };
+    Ok(sessions
+        .iter()
+        .map(|session| {
+            format!(
+                "{}\t{}{}",
+                session.name.as_str(),
+                session.visual_state.metrics_label_value(),
+                if session.is_default { "\tdefault" } else { "" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+fn run_create(vm: Option<&String>, name: Option<&String>) -> Result<String, String> {
+    let vm = parse_vm(vm)?;
+    let name = match name {
+        Some(name) => parse_shell_name(Some(name))?,
+        None => FriendlyName::generate().map_err(|_| "unable to allocate a friendly name")?,
+    };
+    attach_then_disconnect(PlannedAction::AttachShell {
+        vm,
+        name: Some(name),
+        force: false,
+    })
+}
+
+fn run_open(vm: Option<&String>, name: Option<&String>, force: bool) -> Result<String, String> {
+    let vm = parse_vm(vm)?;
+    let name = parse_shell_name(name)?;
+    attach_then_disconnect(PlannedAction::AttachShell {
+        vm,
+        name: Some(name),
+        force,
+    })
+}
+
+fn run_stop(vm: Option<&String>, name: Option<&String>, confirmed: bool) -> Result<String, String> {
+    let vm = parse_vm(vm)?;
+    let name = parse_shell_name(name)?;
+    if !confirmed {
+        return Err("stop requires --confirm".to_string());
+    }
+    let action = PlannedAction::KillShell { vm, name };
+    let outcome = D2bActionBoundary::new(Default::default())
+        .execute_blocking(action)
+        .map_err(|err| err.to_string())?;
+    match outcome {
+        D2bActionOutcome::Killed { result, .. } => Ok(format!("killed={}", result.killed)),
+        _ => Err("unexpected stop result".to_string()),
+    }
+}
+
+fn attach_then_disconnect(action: PlannedAction) -> Result<String, String> {
+    let outcome = D2bActionBoundary::new(Default::default())
+        .execute_blocking(action)
+        .map_err(|err| err.to_string())?;
+    let D2bActionOutcome::Attached {
+        attached,
+        resolved_name,
+        ..
+    } = outcome
+    else {
+        return Err("unexpected open result".to_string());
+    };
+    futures::executor::block_on(attached.close_attach()).map_err(|err| err.to_string())?;
+    Ok(format!("opened={}", resolved_name.as_str()))
+}
+
+fn parse_vm(value: Option<&String>) -> Result<VmId, String> {
+    VmId::new(value.ok_or_else(|| "vm is required".to_string())?)
+        .map_err(|_| "vm id must not be empty".to_string())
+}
+
+fn parse_shell_name(value: Option<&String>) -> Result<FriendlyName, String> {
+    FriendlyName::from_candidate(value.ok_or_else(|| "shell name is required".to_string())?)
+        .map_err(|_| "friendly name must satisfy d2b shell-name grammar".to_string())
 }
 
 fn default_config_toml() -> String {
@@ -100,7 +195,16 @@ fn render_stop_request(request: &StopRequest) -> String {
 }
 
 fn render_async_error(event: &AsyncErrorEvent) -> String {
-    format!("async-error render={}", event.should_render())
+    let display = match event.display {
+        AsyncErrorDisplay::Inline => "inline",
+        AsyncErrorDisplay::Notification => "notification",
+        AsyncErrorDisplay::Waybar => "waybar",
+        AsyncErrorDisplay::Silent => "silent",
+    };
+    format!(
+        "async-error render={} display={display}",
+        event.should_render()
+    )
 }
 
 #[cfg(test)]
@@ -121,6 +225,14 @@ mod tests {
         assert_eq!(
             run(vec!["waybar".into()]).unwrap(),
             WaybarStatus::idle().to_json()
+        );
+    }
+
+    #[test]
+    fn stop_without_confirmation_does_not_dispatch() {
+        assert_eq!(
+            run(vec!["stop".into(), "work".into(), "quiet-otter".into()]).unwrap_err(),
+            "stop requires --confirm"
         );
     }
 }

@@ -81,9 +81,44 @@ pub enum OpenBehavior {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AsyncErrorDisplay {
+    Inline,
     Notification,
     Waybar,
     Silent,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SafeCorrelation(String);
+
+impl SafeCorrelation {
+    pub fn new(value: impl Into<String>) -> Result<Self, ModelError> {
+        let value = value.into();
+        let valid = !value.is_empty()
+            && value.len() <= 80
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+        if valid {
+            Ok(Self(value))
+        } else {
+            Err(ModelError::InvalidCorrelation)
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub const fn metrics_label_value(&self) -> &'static str {
+        "correlation"
+    }
+}
+
+impl fmt::Debug for SafeCorrelation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("SafeCorrelation").field(&self.0).finish()
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -338,11 +373,15 @@ impl Model {
                 }
             }
             UserIntent::OpenSession { vm, name } => self.plan_open(vm, name),
-            UserIntent::StopVm { vm, confirmed } => {
+            UserIntent::StopShell {
+                vm,
+                name,
+                confirmed,
+            } => {
                 if self.config.ui.stop_confirmation && !confirmed {
-                    PlannedAction::PromptStop { vm }
+                    PlannedAction::PromptStop { vm, name }
                 } else {
-                    PlannedAction::StopVm { vm }
+                    PlannedAction::KillShell { vm, name }
                 }
             }
             UserIntent::ForceOpenSession { vm, name } => {
@@ -412,11 +451,26 @@ pub enum ModelEvent {
 #[derive(Clone, PartialEq, Eq)]
 pub enum UserIntent {
     RefreshVms,
-    ListSessions { vm: VmId },
-    CreateSession { vm: VmId, name: FriendlyName },
-    OpenSession { vm: VmId, name: FriendlyName },
-    ForceOpenSession { vm: VmId, name: FriendlyName },
-    StopVm { vm: VmId, confirmed: bool },
+    ListSessions {
+        vm: VmId,
+    },
+    CreateSession {
+        vm: VmId,
+        name: FriendlyName,
+    },
+    OpenSession {
+        vm: VmId,
+        name: FriendlyName,
+    },
+    ForceOpenSession {
+        vm: VmId,
+        name: FriendlyName,
+    },
+    StopShell {
+        vm: VmId,
+        name: FriendlyName,
+        confirmed: bool,
+    },
 }
 
 impl fmt::Debug for UserIntent {
@@ -439,9 +493,10 @@ impl fmt::Debug for UserIntent {
                 .field("vm", vm)
                 .field("name", &"<redacted>")
                 .finish(),
-            Self::StopVm { vm, confirmed } => f
-                .debug_struct("StopVm")
+            Self::StopShell { vm, confirmed, .. } => f
+                .debug_struct("StopShell")
                 .field("vm", vm)
+                .field("name", &"<redacted>")
                 .field("confirmed", confirmed)
                 .finish(),
         }
@@ -469,9 +524,11 @@ pub enum PlannedAction {
     },
     PromptStop {
         vm: VmId,
+        name: FriendlyName,
     },
-    StopVm {
+    KillShell {
         vm: VmId,
+        name: FriendlyName,
     },
     Disabled {
         reason: DisabledReason,
@@ -488,7 +545,7 @@ impl PlannedAction {
             Self::FocusExistingShell { .. } => "focus-existing-shell",
             Self::PromptAlreadyAttached { .. } => "prompt-already-attached",
             Self::PromptStop { .. } => "prompt-stop",
-            Self::StopVm { .. } => "stop-vm",
+            Self::KillShell { .. } => "kill-shell",
             Self::Disabled { reason } => reason.metrics_label_value(),
         }
     }
@@ -515,8 +572,16 @@ impl fmt::Debug for PlannedAction {
                 .field("vm", vm)
                 .field("name", &"<redacted>")
                 .finish(),
-            Self::PromptStop { vm } => f.debug_struct("PromptStop").field("vm", vm).finish(),
-            Self::StopVm { vm } => f.debug_struct("StopVm").field("vm", vm).finish(),
+            Self::PromptStop { vm, .. } => f
+                .debug_struct("PromptStop")
+                .field("vm", vm)
+                .field("name", &"<redacted>")
+                .finish(),
+            Self::KillShell { vm, .. } => f
+                .debug_struct("KillShell")
+                .field("vm", vm)
+                .field("name", &"<redacted>")
+                .finish(),
             Self::Disabled { reason } => {
                 f.debug_struct("Disabled").field("reason", reason).finish()
             }
@@ -543,6 +608,7 @@ impl DisabledReason {
 pub struct AsyncErrorEvent {
     pub message: String,
     pub display: AsyncErrorDisplay,
+    pub correlation: Option<SafeCorrelation>,
 }
 
 impl AsyncErrorEvent {
@@ -550,6 +616,19 @@ impl AsyncErrorEvent {
         Self {
             message: message.into(),
             display,
+            correlation: None,
+        }
+    }
+
+    pub fn with_correlation(
+        message: impl Into<String>,
+        display: AsyncErrorDisplay,
+        correlation: SafeCorrelation,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            display,
+            correlation: Some(correlation),
         }
     }
 
@@ -559,6 +638,7 @@ impl AsyncErrorEvent {
 
     pub const fn metrics_label_value(&self) -> &'static str {
         match self.display {
+            AsyncErrorDisplay::Inline => "inline",
             AsyncErrorDisplay::Notification => "notification",
             AsyncErrorDisplay::Waybar => "waybar",
             AsyncErrorDisplay::Silent => "silent",
@@ -570,6 +650,7 @@ impl AsyncErrorEvent {
 pub enum ModelError {
     EmptyVmId,
     EmptySessionId,
+    InvalidCorrelation,
 }
 
 #[cfg(test)]
@@ -732,20 +813,26 @@ mod tests {
     fn stop_requires_confirmation_until_confirmed() {
         let model = Model::new(Config::default());
         let work = vm("work");
+        let name = shell("quiet-otter");
 
         assert_eq!(
-            model.plan(UserIntent::StopVm {
+            model.plan(UserIntent::StopShell {
                 vm: work.clone(),
+                name: name.clone(),
                 confirmed: false
             }),
-            PlannedAction::PromptStop { vm: work.clone() }
+            PlannedAction::PromptStop {
+                vm: work.clone(),
+                name: name.clone()
+            }
         );
         assert_eq!(
-            model.plan(UserIntent::StopVm {
+            model.plan(UserIntent::StopShell {
                 vm: work.clone(),
+                name: name.clone(),
                 confirmed: true
             }),
-            PlannedAction::StopVm { vm: work }
+            PlannedAction::KillShell { vm: work, name }
         );
     }
 
@@ -762,6 +849,26 @@ mod tests {
         assert_eq!(model.async_errors()[0].display, AsyncErrorDisplay::Waybar);
         assert!(model.async_errors()[0].should_render());
         assert_eq!(model.async_errors()[0].metrics_label_value(), "waybar");
+    }
+
+    #[test]
+    fn async_errors_can_carry_safe_correlation() {
+        let correlation = SafeCorrelation::new("wlterm-deadbeef").expect("safe");
+        let event = AsyncErrorEvent::with_correlation(
+            "daemon request failed",
+            AsyncErrorDisplay::Inline,
+            correlation,
+        );
+
+        assert_eq!(event.metrics_label_value(), "inline");
+        assert_eq!(
+            event.correlation.as_ref().map(SafeCorrelation::as_str),
+            Some("wlterm-deadbeef")
+        );
+        assert_eq!(
+            SafeCorrelation::new("quiet-otter/opaque-session-handle"),
+            Err(ModelError::InvalidCorrelation)
+        );
     }
 
     #[test]

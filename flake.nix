@@ -23,7 +23,9 @@
             postPatch = ''
               substituteInPlace Cargo.toml \
                 --replace-fail "../d2b-toolkit/crates/d2b-toolkit-core" \
-                  "${toolkitSource}/share/d2b-toolkit/crates/d2b-toolkit-core"
+                  "${toolkitSource}/share/d2b-toolkit/crates/d2b-toolkit-core" \
+                --replace-fail "../d2b-toolkit/crates/d2b-client" \
+                  "${toolkitSource}/share/d2b-toolkit/crates/d2b-client"
             '';
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [ "-p" "wlterm-cli" ];

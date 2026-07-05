@@ -11,6 +11,7 @@ name = "d2b-wlterm"
 path = "src/main.rs"
 
 [dependencies]
+futures.workspace = true
 wlterm-core.workspace = true
 wlterm-d2b.workspace = true
 wlterm-waybar.workspace = true

@@ -12,13 +12,15 @@ Implemented:
 - core reducer and action planner for VM/session state;
 - offline VM guards that disable shell list/create/open actions;
 - Stop confirmation, already-attached Open, and async error-display models;
-- `d2b-wlterm` CLI with small smoke-test commands;
+- `d2b-wlterm` CLI with public-socket shell list, open/create, and
+  confirmed stop commands;
 - `homeManagerModules.default` with package install, `config.toml` rendering, and
   Waybar module-file rendering;
-- a local `d2b-toolkit` DTO boundary for future public-socket transport work.
+- a local `d2b-toolkit`/`d2b-client` boundary for public daemon shell actions.
 
-The d2b integration crate intentionally stops at typed action-to-DTO mapping.
-Runtime socket transport remains behind that boundary.
+The d2b integration crate uses only the public daemon socket. Stop dispatches a
+shell kill only after confirmation, and closing an attached terminal view sends a
+disconnect request rather than killing the shell.
 
 ## Development
 

@@ -13,7 +13,10 @@ wlterm-core = { path = "crates/wlterm-core" }
 wlterm-d2b = { path = "crates/wlterm-d2b" }
 wlterm-waybar = { path = "crates/wlterm-waybar" }
 wlterm-ui = { path = "crates/wlterm-ui" }
+d2b-client = { path = "../d2b-toolkit/crates/d2b-client" }
 d2b-toolkit-core = { path = "../d2b-toolkit/crates/d2b-toolkit-core" }
+futures = "0.3"
 petname = "2.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"

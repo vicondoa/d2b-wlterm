@@ -72,7 +72,7 @@ in
     };
 
     asyncErrorDisplay = lib.mkOption {
-      type = lib.types.enum [ "notification" "waybar" "silent" ];
+      type = lib.types.enum [ "inline" "notification" "waybar" "silent" ];
       default = "notification";
       description = "How delayed d2b/compositor errors should be surfaced.";
     };

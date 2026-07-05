@@ -24,5 +24,9 @@ module_name = "custom/d2b-wlterm"
 - `prompt`: ask before opening another attachment.
 - `force-open`: request a new attachment even when one is already attached.
 
+`ui.async_error_display` accepts `inline`, `notification`, `waybar`, or
+`silent`. Async d2b client failures include a bounded trace/correlation id and
+must not display raw shell names, opaque daemon handles, or terminal bytes.
+
 Offline VMs remain visible but shell list, create, and open actions are disabled
 in the core planner.
