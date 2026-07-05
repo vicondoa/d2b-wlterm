@@ -4,10 +4,12 @@
 //! plans through `wlterm-core`, executes through `d2b-client`, and never talks
 //! to the privileged broker or mutates host state directly.
 
-use d2b_client::{AttachedShell, ClientError, PublicSocketClient};
+use d2b_client::{
+    read_hello_response, send_hello, AttachedShell, ClientError, FrameBounds, PublicSocketClient,
+};
 use d2b_toolkit_core::{
-    ShellKillResult, ShellListResult, ShellName, ShellOp, ShellSessionState, SocketClass,
-    TerminalSize, ToolkitError,
+    Hello, KnownFeatureFlag, ShellKillResult, ShellListResult, ShellName, ShellOp,
+    ShellSessionState, SocketClass, TerminalSize, ToolkitError,
 };
 use futures::executor::block_on;
 use futures::io::{AsyncRead, AsyncWrite};
@@ -103,10 +105,10 @@ impl D2bActionBoundary {
             )
         })?;
         let timeout = Duration::from_millis(self.config.operation_timeout_ms);
-        let transport = BlockingUnixTransport::new(stream, timeout).map_err(|source| {
+        let mut transport = BlockingUnixTransport::new(stream, timeout).map_err(|source| {
             D2bClientError::from_client_error(
                 "connect",
-                trace,
+                trace.clone(),
                 ToolkitError::Io {
                     context: "configuring public socket",
                     source,
@@ -114,7 +116,19 @@ impl D2bActionBoundary {
                 .into(),
             )
         })?;
-        Ok(PublicSocketClient::new(transport))
+        let bounds = FrameBounds::default();
+        block_on(async {
+            send_hello(
+                &mut transport,
+                &Hello::toolkit_client(vec![KnownFeatureFlag::TypedErrors.wire_value()]),
+                bounds,
+            )
+            .await?;
+            read_hello_response(&mut transport, bounds).await?;
+            Ok::<(), ClientError>(())
+        })
+        .map_err(|err| D2bClientError::from_client_error("connect", trace, err))?;
+        Ok(PublicSocketClient::with_bounds(transport, bounds))
     }
 
     pub fn execute_blocking(
