@@ -60,7 +60,7 @@ in
     };
 
     defaultOpenBehavior = lib.mkOption {
-      type = lib.types.enum [ "focus-existing" "open-new" "prompt" ];
+      type = lib.types.enum [ "focus-existing" "force-open" "prompt" ];
       default = "focus-existing";
       description = "Default UI behavior when a terminal is already attached.";
     };

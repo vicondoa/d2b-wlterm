@@ -18,4 +18,11 @@ enable = true
 module_name = "custom/d2b-wlterm"
 ```
 
-The schema is intentionally provisional until the d2b-toolkit adapter lands.
+`ui.default_open_behavior` accepts:
+
+- `focus-existing`: focus the existing attached terminal when possible.
+- `prompt`: ask before opening another attachment.
+- `force-open`: request a new attachment even when one is already attached.
+
+Offline VMs remain visible but shell list, create, and open actions are disabled
+in the core planner.

@@ -13,11 +13,7 @@ wlterm-core = { path = "crates/wlterm-core" }
 wlterm-d2b = { path = "crates/wlterm-d2b" }
 wlterm-waybar = { path = "crates/wlterm-waybar" }
 wlterm-ui = { path = "crates/wlterm-ui" }
+d2b-toolkit-core = { path = "../d2b-toolkit/crates/d2b-toolkit-core" }
 petname = "2.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-# TODO(d2b-toolkit): once github.com/vicondoa/d2b-toolkit is available in
-# /home/paydro/projects/d2b-toolkit, wire the relevant crate here as a local
-# path dependency and replace the wlterm-d2b transport stub.
-# d2b-toolkit = { path = "../d2b-toolkit/crates/d2b-toolkit" }

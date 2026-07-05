@@ -7,6 +7,7 @@ pub enum OpenDecision {
     OpenNew { session: String },
     FocusExisting { session: String },
     Prompt { session: String },
+    ForceOpen { session: String },
 }
 
 impl std::fmt::Debug for OpenDecision {
@@ -22,6 +23,10 @@ impl std::fmt::Debug for OpenDecision {
                 .finish(),
             Self::Prompt { .. } => f
                 .debug_struct("Prompt")
+                .field("session", &"<redacted>")
+                .finish(),
+            Self::ForceOpen { .. } => f
+                .debug_struct("ForceOpen")
                 .field("session", &"<redacted>")
                 .finish(),
         }
@@ -43,7 +48,7 @@ pub fn decide_open(
         OpenBehavior::FocusExisting => OpenDecision::FocusExisting {
             session: session.as_str().to_string(),
         },
-        OpenBehavior::OpenNew => OpenDecision::OpenNew {
+        OpenBehavior::ForceOpen => OpenDecision::ForceOpen {
             session: session.as_str().to_string(),
         },
         OpenBehavior::Prompt => OpenDecision::Prompt {
@@ -105,6 +110,17 @@ mod tests {
         assert_eq!(
             decide_open(&session, true, OpenBehavior::FocusExisting),
             OpenDecision::FocusExisting {
+                session: "work".into()
+            }
+        );
+    }
+
+    #[test]
+    fn already_attached_open_can_force_new_attachment() {
+        let session = SessionId::new("work").unwrap();
+        assert_eq!(
+            decide_open(&session, true, OpenBehavior::ForceOpen),
+            OpenDecision::ForceOpen {
                 session: "work".into()
             }
         );

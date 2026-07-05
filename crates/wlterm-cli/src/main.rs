@@ -32,7 +32,10 @@ fn run(args: Vec<String>) -> Result<String, String> {
                     .as_str()
                     .to_string())
             } else {
-                Ok(FriendlyName::generate().as_str().to_string())
+                Ok(FriendlyName::generate()
+                    .map_err(|_| "unable to allocate a friendly name".to_string())?
+                    .as_str()
+                    .to_string())
             }
         }
         Some("waybar") => Ok(WaybarStatus::idle().to_json()),
@@ -66,7 +69,7 @@ fn help() -> String {
 fn default_config_toml() -> String {
     let cfg = Config::default();
     format!(
-        "public_socket_path = \"{}\"\nwezterm_command = [{}]\nrefresh_interval_seconds = {}\n\n[ui]\ndefault_open_behavior = \"focus-existing\"\nstop_confirmation = {}\nasync_error_display = \"notification\"",
+        "public_socket_path = \"{}\"\nwezterm_command = [{}]\nrefresh_interval_seconds = {}\n\n[ui]\ndefault_open_behavior = \"focus-existing\"\nstop_confirmation = {}\nasync_error_display = \"notification\"\n\n[waybar]\nenable = {}\nmodule_name = \"{}\"",
         cfg.public_socket_path,
         cfg.wezterm_command
             .iter()
@@ -75,6 +78,8 @@ fn default_config_toml() -> String {
             .join(", "),
         cfg.refresh_interval_seconds,
         cfg.ui.stop_confirmation,
+        cfg.waybar.enable,
+        cfg.waybar.module_name.replace('"', "\\\""),
     )
 }
 
@@ -83,6 +88,7 @@ fn render_open_decision(decision: OpenDecision) -> String {
         OpenDecision::OpenNew { .. } => "open-new".to_string(),
         OpenDecision::FocusExisting { .. } => "focus-existing".to_string(),
         OpenDecision::Prompt { .. } => "prompt".to_string(),
+        OpenDecision::ForceOpen { .. } => "force-open".to_string(),
     }
 }
 

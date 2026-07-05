@@ -2,8 +2,9 @@
   description = "Wayland terminal launcher companion for d2b";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.d2b-toolkit.url = "path:/home/paydro/projects/d2b-toolkit";
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, d2b-toolkit }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
@@ -12,12 +13,18 @@
       packages = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
+          toolkitSource = d2b-toolkit.packages.${system}.default;
         in
         {
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "d2b-wlterm";
             version = "0.1.0-dev";
             src = pkgs.lib.cleanSource ./.;
+            postPatch = ''
+              substituteInPlace Cargo.toml \
+                --replace-fail "../d2b-toolkit/crates/d2b-toolkit-core" \
+                  "${toolkitSource}/share/d2b-toolkit/crates/d2b-toolkit-core"
+            '';
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [ "-p" "wlterm-cli" ];
             cargoTestFlags = [ "--workspace" ];
@@ -53,6 +60,7 @@
               (import ./nix/home-manager.nix { inherit self; })
               {
                 programs.d2b-wlterm.enable = true;
+                programs.d2b-wlterm.defaultOpenBehavior = "force-open";
                 programs.d2b-wlterm.waybar.enable = true;
               }
             ];
@@ -61,7 +69,10 @@
           package = self.packages.${system}.default;
           home-manager-module = pkgs.runCommand "d2b-wlterm-home-manager-module" { } ''
             test -n "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
-            test -n "${hmEval.config.xdg.configFile."d2b-wlterm/waybar-module.json".text}"
+            grep -q 'default_open_behavior = "force-open"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
+            grep -q 'module_name = "custom/d2b-wlterm"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
+            printf '%s' '${hmEval.config.xdg.configFile."d2b-wlterm/waybar-module.json".text}' \
+              | grep -q '"custom/d2b-wlterm"'
             touch $out
           '';
         });

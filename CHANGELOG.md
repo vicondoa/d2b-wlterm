@@ -12,3 +12,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Initial Rust/Nix workspace skeleton with core, d2b, Waybar, UI, and CLI crates.
 - Home Manager module scaffold for package installation, config rendering, and Waybar integration.
 - Deterministic friendly-name generator and model stubs for planned terminal lifecycle behavior.
+- Core VM/session reducer and action planner with offline VM guards, Stop confirmation,
+  already-attached Open fallbacks, async error state, and bounded friendly shell-name allocation.
+- Local d2b-toolkit DTO integration boundary for planned shell actions.
