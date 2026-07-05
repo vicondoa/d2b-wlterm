@@ -4,7 +4,7 @@
 shape under `$XDG_CONFIG_HOME/d2b-wlterm/config.toml`.
 
 ```toml
-public_socket_path = "$XDG_RUNTIME_DIR/d2b/public.sock"
+public_socket_path = "/run/d2b/public.sock"
 wezterm_command = ["wezterm", "start", "--"]
 refresh_interval_seconds = 5
 

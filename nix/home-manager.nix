@@ -65,7 +65,7 @@ in
 
     publicSocketPath = lib.mkOption {
       type = lib.types.str;
-      default = "$XDG_RUNTIME_DIR/d2b/public.sock";
+      default = "/run/d2b/public.sock";
       description = "Path to the d2b public daemon socket used by the launcher.";
     };
 
