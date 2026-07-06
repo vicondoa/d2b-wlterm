@@ -7,11 +7,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1783295454,
-        "narHash": "sha256-Y9ztrDJMjvHQ16Y4r0wTRKhUtdHUzARll2zZOPAPc7o=",
+        "lastModified": 1783296950,
+        "narHash": "sha256-OdvP+Gnd+WJ4G/egzkwC6Y7ed8CjMH0TNtT8VRet5xI=",
         "owner": "vicondoa",
         "repo": "d2b-toolkit",
-        "rev": "b095c7465774217db9240bf581df6df60e24afcf",
+        "rev": "708db5c6c0c1df56d6232c497c6720c2a07e6cc6",
         "type": "github"
       },
       "original": {

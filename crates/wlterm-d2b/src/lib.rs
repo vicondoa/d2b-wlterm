@@ -800,9 +800,9 @@ mod tests {
             assert!(sessions[0].is_default);
             assert_eq!(sessions[0].visual_state, ShellVisualState::Detached);
             let frames = client.into_inner().written_json_frames();
-            assert_eq!(frames[0]["kind"], "shell");
-            assert_eq!(frames[0]["payload"]["op"], "list");
-            assert_eq!(frames[0]["payload"]["args"]["vm"], "work");
+            assert_eq!(frames[0]["type"], "shell");
+            assert_eq!(frames[0]["op"], "list");
+            assert_eq!(frames[0]["args"]["vm"], "work");
         });
     }
 
@@ -838,9 +838,9 @@ mod tests {
             assert!(force);
             let client = attached.into_inner();
             let frames = client.into_inner().written_json_frames();
-            assert_eq!(frames[0]["payload"]["op"], "attach");
-            assert_eq!(frames[0]["payload"]["args"]["force"], true);
-            assert_eq!(frames[0]["payload"]["args"]["name"], "quiet-otter");
+            assert_eq!(frames[0]["op"], "attach");
+            assert_eq!(frames[0]["args"]["force"], true);
+            assert_eq!(frames[0]["args"]["name"], "quiet-otter");
         });
     }
 
@@ -867,8 +867,8 @@ mod tests {
                 panic!("expected attached outcome");
             };
             let frames = attached.into_inner().into_inner().written_json_frames();
-            assert_eq!(frames[0]["payload"]["op"], "attach");
-            assert_eq!(frames[0]["payload"]["args"]["force"], false);
+            assert_eq!(frames[0]["op"], "attach");
+            assert_eq!(frames[0]["args"]["force"], false);
         });
     }
 
@@ -917,7 +917,7 @@ mod tests {
             };
             assert!(result.killed);
             let frames = client.into_inner().written_json_frames();
-            assert_eq!(frames[0]["payload"]["op"], "kill");
+            assert_eq!(frames[0]["op"], "kill");
         });
     }
 
@@ -953,9 +953,9 @@ mod tests {
             let (client, detach) = attached.close_attach().await.unwrap();
             assert!(detach.detached);
             let frames = client.into_inner().written_json_frames();
-            assert_eq!(frames[0]["payload"]["op"], "attach");
-            assert_eq!(frames[1]["payload"]["op"], "closeAttach");
-            assert_ne!(frames[1]["payload"]["op"], "kill");
+            assert_eq!(frames[0]["op"], "attach");
+            assert_eq!(frames[1]["op"], "closeAttach");
+            assert_ne!(frames[1]["op"], "kill");
         });
     }
 
