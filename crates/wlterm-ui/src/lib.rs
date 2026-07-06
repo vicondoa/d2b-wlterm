@@ -261,6 +261,7 @@ const QML_SOURCE: &str = r##"
       property var state: ({ vms: [], activeShells: 0, hasError: false, errors: [] })
       property bool busy: false
       property string message: ""
+      property string hoverHint: ""
       property bool failed: false
       property string confirmKey: ""
       property real panelTopMargin: 24
@@ -291,6 +292,7 @@ const QML_SOURCE: &str = r##"
       }
       function statusText() {
         if (message.length > 0) return message
+        if (hoverHint.length > 0) return hoverHint
         if (busy) return "working..."
         if ((state.vms || []).length === 0) return "no shell-capable VMs"
         return root.shellCountLabel(state.activeShells || 0, "active shell")
@@ -389,8 +391,8 @@ const QML_SOURCE: &str = r##"
         focusable: true
         aboveWindows: true
         exclusiveZone: 0
-        implicitWidth: 560
-        implicitHeight: Math.min(Math.max(330, root.panelContentHeight()), Math.floor(root.screenHeight() * 0.62))
+        implicitWidth: 420
+        implicitHeight: Math.min(Math.max(240, root.panelContentHeight()), Math.floor(root.screenHeight() * 0.5))
         color: "transparent"
         surfaceFormat { opaque: false }
         anchors { top: true; right: true }
@@ -398,22 +400,22 @@ const QML_SOURCE: &str = r##"
 
         Rectangle {
           anchors.fill: parent
-          radius: 20
+          radius: 18
           color: "#0f1117"
           border.color: "#2a2d35"
           border.width: 1
           clip: true
 
           Column {
-            x: 20
-            y: 18
-            width: parent.width - 40
-            height: parent.height - 36
-            spacing: 14
+            x: 16
+            y: 16
+            width: parent.width - 32
+            height: parent.height - 32
+            spacing: 12
 
             Item {
               width: parent.width
-              height: 38
+              height: 32
               MouseArea {
                 anchors.fill: parent
                 acceptedButtons: Qt.LeftButton
@@ -426,7 +428,7 @@ const QML_SOURCE: &str = r##"
                 anchors.centerIn: parent
                 text: "d2b terminals"
                 color: "#ffffff"
-                font.pixelSize: 20
+                font.pixelSize: 16
                 font.bold: true
               }
               Row {
@@ -443,8 +445,8 @@ const QML_SOURCE: &str = r##"
               width: parent.width
               height: 24
               spacing: 10
-              Text { text: (root.state.vms || []).length + " VM(s)"; color: "#ffffff"; font.pixelSize: 15; font.bold: true }
-              Text { text: root.statusText(); color: root.failed ? "#f38ba8" : "#9399b2"; font.pixelSize: 14; elide: Text.ElideRight; width: parent.width - 92 }
+              Text { text: (root.state.vms || []).length + " VM(s)"; color: "#ffffff"; font.pixelSize: 13; font.bold: true }
+              Text { text: root.statusText(); color: root.failed ? "#f38ba8" : "#9399b2"; font.pixelSize: 12; elide: Text.ElideRight; width: parent.width - 80 }
             }
 
             Rectangle {
@@ -475,65 +477,55 @@ const QML_SOURCE: &str = r##"
                   Rectangle {
                     id: vmCard
                     width: list.width
-                    height: card.implicitHeight + 18
-                    radius: 15
+                    height: card.implicitHeight + 16
+                    radius: 13
                     color: "#16181d"
                     border.color: root.vmAccent(vm)
                     border.width: 1
                     property var vm: modelData
-
-                    Rectangle {
-                      anchors.left: parent.left
-                      anchors.top: parent.top
-                      anchors.bottom: parent.bottom
-                      width: 7
-                      radius: 15
-                      color: root.vmAccent(vm)
-                    }
 
                     Column {
                       id: card
                       anchors.left: parent.left
                       anchors.right: parent.right
                       anchors.top: parent.top
-                      anchors.margins: 12
-                      anchors.leftMargin: 18
-                      spacing: 10
+                      anchors.margins: 8
+                      spacing: 6
 
                       Row {
                         width: parent.width
-                        height: 38
-                        spacing: 10
-                          Text { text: "●"; color: root.vmAccent(vm); font.pixelSize: 18; width: 22; horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter }
+                        height: 30
+                        spacing: 8
+                          StatusIcon { icon: "circle"; accent: "#9399b2"; tooltip: (vm.label || vm.id) + " is shell-capable"; }
                           Column {
-                            width: parent.width - 158
+                            width: parent.width - 96
                             anchors.verticalCenter: parent.verticalCenter
-                            Text { text: vm.label || vm.id; color: "#ffffff"; font.pixelSize: 17; font.bold: true; elide: Text.ElideRight; width: parent.width }
-                            Text { text: root.shellCountLabel(vm.activeShells || 0, "shell"); color: "#9399b2"; font.pixelSize: 13 }
+                            Text { text: vm.label || vm.id; color: "#ffffff"; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width }
+                            Text { text: root.shellCountLabel(vm.activeShells || 0, "shell"); color: "#9399b2"; font.pixelSize: 11 }
                           }
-                          ActionButton { label: "new"; tooltip: "Create a named shell and open it"; accent: root.vmAccent(vm); enabled: !root.busy; onClicked: root.action(["create", vm.id]) }
+                          IconButton { text: "add"; tooltip: "Create a named shell and open it"; enabled: !root.busy; onClicked: root.action(["create", vm.id]) }
                         }
 
                         Repeater {
                           model: vm.shells || []
                           Rectangle {
                             width: card.width
-                            height: 42
-                            radius: 11
+                            height: 32
+                            radius: 9
                             color: "#0d0f14"
                             border.color: modelData.attached ? root.vmAccent(vm) : "#313645"
                             border.width: 1
-                          Row {
-                            anchors.fill: parent
-                            anchors.margins: 7
-                            spacing: 8
-                            Text { text: modelData.attached ? "attached" : "detached"; color: modelData.attached ? root.vmAccent(vm) : "#a6e3a1"; font.pixelSize: 12; font.bold: true; width: 72; anchors.verticalCenter: parent.verticalCenter }
-                            Text { text: modelData.name; color: "#ffffff"; font.pixelSize: 14; elide: Text.ElideRight; width: parent.width - 210; anchors.verticalCenter: parent.verticalCenter }
-                            ActionButton { label: modelData.attached ? "attach" : "open"; tooltip: "Attach to " + modelData.name; accent: root.vmAccent(vm); enabled: !root.busy; onClicked: root.action(["open", vm.id, modelData.name]) }
-                            ActionButton { label: root.confirmKey === ("stop:" + vm.id + ":" + modelData.name) ? "sure?" : "stop"; tooltip: "Stop " + modelData.name; enabled: !root.busy; danger: true; onClicked: root.confirmStop(vm.id, modelData.name) }
+                            Row {
+                              anchors.fill: parent
+                              anchors.margins: 5
+                              spacing: 6
+                              StatusIcon { icon: modelData.attached ? "link" : "link_off"; accent: modelData.attached ? "#ffffff" : "#9399b2"; tooltip: modelData.attached ? "attached" : "detached"; }
+                              Text { text: modelData.name; color: "#ffffff"; font.pixelSize: 12; elide: Text.ElideRight; width: parent.width - 126; anchors.verticalCenter: parent.verticalCenter }
+                              IconButton { text: "terminal"; tooltip: "Attach to " + modelData.name; enabled: !root.busy; onClicked: root.action(["open", vm.id, modelData.name]) }
+                              IconButton { text: root.confirmKey === ("stop:" + vm.id + ":" + modelData.name) ? "priority_high" : "stop"; tooltip: "Stop " + modelData.name; accent: "#9399b2"; enabled: !root.busy; onClicked: root.confirmStop(vm.id, modelData.name) }
+                            }
                           }
                         }
-                      }
                     }
                   }
                 }
@@ -543,35 +535,66 @@ const QML_SOURCE: &str = r##"
         }
       }
 
-      component ActionButton: Rectangle {
-        property string label: ""
+      component StatusIcon: Rectangle {
+        property string icon: ""
         property string tooltip: ""
-        property bool danger: false
-        property string accent: "#89b4fa"
-        signal clicked()
-        width: Math.max(62, buttonText.implicitWidth + 24)
-        height: 28
-        radius: 999
-        color: enabled ? (danger ? "#2e1a1a" : "#1d2430") : "#16181d"
-        border.color: enabled ? (danger ? "#f38ba8" : accent) : "#313645"
-        border.width: 2
-        opacity: enabled ? 1.0 : 0.45
-        Text { id: buttonText; anchors.centerIn: parent; text: label; color: danger ? "#f38ba8" : "#cdd6f4"; font.pixelSize: 13; font.bold: true }
-        MouseArea { anchors.fill: parent; hoverEnabled: true; enabled: parent.enabled; onClicked: parent.clicked() }
+        property string accent: "#9399b2"
+        width: 26
+        height: 26
+        radius: width / 2
+        color: "transparent"
+        Text {
+          anchors.fill: parent
+          text: parent.icon
+          color: parent.accent
+          font.pixelSize: 20
+          font.family: "Material Symbols Rounded"
+          horizontalAlignment: Text.AlignHCenter
+          verticalAlignment: Text.AlignVCenter
+        }
+        MouseArea {
+          anchors.fill: parent
+          hoverEnabled: true
+          onContainsMouseChanged: root.hoverHint = containsMouse ? parent.tooltip : ""
+        }
       }
 
       component IconButton: Rectangle {
-        property string text: ""
+        property alias text: label.text
         property string tooltip: ""
+        property color accent: "#9399b2"
+        property bool prominent: false
         signal clicked()
-        width: 28
-        height: 24
-        radius: 8
-        color: enabled ? "#1d2430" : "#16181d"
-        border.color: enabled ? "#89b4fa" : "#313645"
-        border.width: 1
-        Text { anchors.centerIn: parent; text: parent.text; color: "#cdd6f4"; font.pixelSize: 14; font.family: "Material Symbols Rounded" }
-        MouseArea { anchors.fill: parent; enabled: parent.enabled; onClicked: parent.clicked() }
+        width: prominent ? 30 : 26
+        height: prominent ? 30 : 26
+        radius: width / 2
+        opacity: enabled ? 1.0 : 0.45
+        border.width: prominent ? 1 : 0
+        border.color: prominent ? accent : "transparent"
+        color: prominent
+          ? Qt.rgba(accent.r, accent.g, accent.b, mouse.containsMouse ? 0.34 : 0.24)
+          : (mouse.containsMouse ? Qt.rgba(accent.r, accent.g, accent.b, 0.12) : "transparent")
+
+        Text {
+          id: label
+          anchors.fill: parent
+          color: enabled ? parent.accent : "#9399b2"
+          font.family: "Material Symbols Rounded"
+          font.pixelSize: prominent ? 21 : 20
+          font.bold: false
+          horizontalAlignment: Text.AlignHCenter
+          verticalAlignment: Text.AlignVCenter
+        }
+        MouseArea {
+          id: mouse
+          anchors.fill: parent
+          hoverEnabled: true
+          enabled: parent.enabled
+          onContainsMouseChanged: root.hoverHint = containsMouse ? (parent.tooltip.length > 0 ? parent.tooltip : parent.text) : ""
+          onClicked: parent.clicked()
+          onEntered: parent.scale = 1.05
+          onExited: parent.scale = 1.0
+        }
       }
     }
     "##;
