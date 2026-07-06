@@ -10,6 +10,7 @@ repository.workspace = true
 d2b-client.workspace = true
 d2b-toolkit-core.workspace = true
 futures.workspace = true
+nix = { version = "0.29", default-features = false, features = ["socket"] }
 sha2.workspace = true
 wlterm-core.workspace = true
 

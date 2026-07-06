@@ -15,8 +15,9 @@ use futures::executor::block_on;
 use futures::io::{AsyncRead, AsyncWrite};
 use sha2::{Digest, Sha256};
 use std::fmt;
-use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
+use std::io;
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::path::Path;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -93,29 +94,21 @@ impl D2bActionBoundary {
         let trace = ActionTrace::for_label("connect-public-socket");
         d2b_client::ensure_allowed_socket(classify_socket_path(&self.config.public_socket_path))
             .map_err(|err| D2bClientError::from_client_error("connect", trace.clone(), err))?;
-        let stream = UnixStream::connect(&self.config.public_socket_path).map_err(|source| {
-            D2bClientError::from_client_error(
-                "connect",
-                trace.clone(),
-                ToolkitError::Io {
-                    context: "connecting public socket",
-                    source,
-                }
-                .into(),
-            )
-        })?;
         let timeout = Duration::from_millis(self.config.operation_timeout_ms);
-        let mut transport = BlockingUnixTransport::new(stream, timeout).map_err(|source| {
-            D2bClientError::from_client_error(
-                "connect",
-                trace.clone(),
-                ToolkitError::Io {
-                    context: "configuring public socket",
-                    source,
-                }
-                .into(),
-            )
-        })?;
+        let mut transport =
+            BlockingUnixTransport::connect(&self.config.public_socket_path, timeout).map_err(
+                |source| {
+                    D2bClientError::from_client_error(
+                        "connect",
+                        trace.clone(),
+                        ToolkitError::Io {
+                            context: "connecting public socket",
+                            source,
+                        }
+                        .into(),
+                    )
+                },
+            )?;
         let bounds = FrameBounds::default();
         block_on(async {
             send_hello(
@@ -212,6 +205,108 @@ impl D2bActionBoundary {
                 })
             }
         }
+    }
+}
+
+fn connect_seqpacket(path: &str) -> io::Result<OwnedFd> {
+    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, UnixAddr};
+
+    let fd = socket(
+        AddressFamily::Unix,
+        SockType::SeqPacket,
+        SockFlag::SOCK_CLOEXEC,
+        None,
+    )
+    .map_err(errno_to_io)?;
+    let addr = UnixAddr::new(Path::new(path)).map_err(errno_to_io)?;
+    connect(fd.as_raw_fd(), &addr).map_err(errno_to_io)?;
+    Ok(fd)
+}
+
+fn errno_to_io(error: nix::errno::Errno) -> io::Error {
+    io::Error::from_raw_os_error(error as i32)
+}
+
+const MAX_PUBLIC_PACKET: usize = 1024 * 1024 + 4;
+
+pub struct BlockingUnixTransport {
+    fd: OwnedFd,
+    read_buf: Vec<u8>,
+    read_pos: usize,
+    write_buf: Vec<u8>,
+}
+
+impl BlockingUnixTransport {
+    fn connect(path: &str, _timeout: Duration) -> io::Result<Self> {
+        Ok(Self {
+            fd: connect_seqpacket(path)?,
+            read_buf: Vec::new(),
+            read_pos: 0,
+            write_buf: Vec::new(),
+        })
+    }
+}
+
+impl AsyncRead for BlockingUnixTransport {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.read_pos >= self.read_buf.len() {
+            let mut packet = vec![0_u8; MAX_PUBLIC_PACKET];
+            let len = nix::sys::socket::recv(
+                self.fd.as_raw_fd(),
+                &mut packet,
+                nix::sys::socket::MsgFlags::empty(),
+            )
+            .map_err(errno_to_io)?;
+            packet.truncate(len);
+            self.read_buf = packet;
+            self.read_pos = 0;
+            if self.read_buf.is_empty() {
+                return Poll::Ready(Ok(0));
+            }
+        }
+        let available = &self.read_buf[self.read_pos..];
+        let len = available.len().min(buf.len());
+        buf[..len].copy_from_slice(&available[..len]);
+        self.read_pos += len;
+        Poll::Ready(Ok(len))
+    }
+}
+
+impl AsyncWrite for BlockingUnixTransport {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.write_buf.extend_from_slice(buf);
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if !self.write_buf.is_empty() {
+            let sent = nix::sys::socket::send(
+                self.fd.as_raw_fd(),
+                &self.write_buf,
+                nix::sys::socket::MsgFlags::empty(),
+            )
+            .map_err(errno_to_io)?;
+            if sent != self.write_buf.len() {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "short write on public seqpacket socket",
+                )));
+            }
+            self.write_buf.clear();
+        }
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.poll_flush(cx)
     }
 }
 
@@ -527,46 +622,6 @@ impl<T> fmt::Debug for D2bActionOutcome<T> {
                 .field("trace", trace)
                 .finish(),
         }
-    }
-}
-
-pub struct BlockingUnixTransport {
-    stream: UnixStream,
-}
-
-impl BlockingUnixTransport {
-    fn new(stream: UnixStream, timeout: Duration) -> std::io::Result<Self> {
-        stream.set_read_timeout(Some(timeout))?;
-        stream.set_write_timeout(Some(timeout))?;
-        Ok(Self { stream })
-    }
-}
-
-impl AsyncRead for BlockingUnixTransport {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Poll::Ready(self.stream.read(buf))
-    }
-}
-
-impl AsyncWrite for BlockingUnixTransport {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Poll::Ready(self.stream.write(buf))
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Poll::Ready(self.stream.flush())
-    }
-
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Poll::Ready(Ok(()))
     }
 }
 
