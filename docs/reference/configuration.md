@@ -5,7 +5,8 @@ shape under `$XDG_CONFIG_HOME/d2b-wlterm/config.toml`.
 
 ```toml
 public_socket_path = "/run/d2b/public.sock"
-wezterm_command = ["wezterm", "start", "--"]
+wezterm_command = ["weezterm", "start", "--"]
+wayland_proxy_command = ["d2b-wayland-proxy"]
 refresh_interval_seconds = 5
 
 [ui]
@@ -21,6 +22,10 @@ module_name = "custom/d2b-wlterm"
 enable = false
 control_center_state_path = "$XDG_RUNTIME_DIR/d2b-wlterm/control-center.json"
 ```
+
+`wezterm_command` must launch WeezTerm. `d2b-wlterm create` and
+`d2b-wlterm open` wrap that command with `wayland_proxy_command` so terminal
+windows receive the d2b Wayland proxy VM rail and clipboard policy.
 
 `ui.default_open_behavior` accepts:
 

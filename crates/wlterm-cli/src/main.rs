@@ -1,8 +1,12 @@
 use std::env;
-use std::process::ExitCode;
+use std::fs;
+use std::process::{Command, ExitCode, Stdio};
 
 use wlterm_core::friendly_name::FriendlyName;
-use wlterm_core::{AsyncErrorDisplay, Config, Model, OpenBehavior, PlannedAction, SessionId, VmId};
+use wlterm_core::{
+    AsyncErrorDisplay, Config, Model, ModelEvent, OpenBehavior, PlannedAction, SessionId, VmId,
+    VmPowerState, VmSummary,
+};
 use wlterm_d2b::{D2bActionBoundary, D2bActionOutcome};
 use wlterm_ui::{
     decide_open, AlreadyAttachedNotice, AsyncErrorEvent, ControlCenterState, OpenDecision,
@@ -42,9 +46,18 @@ fn run(args: Vec<String>) -> Result<String, String> {
                     .to_string())
             }
         }
-        Some("waybar") => Ok(WaybarStatus::from_model(&Model::new(Config::default())).to_json()),
-        Some("state") | Some("control-center") | Some("quickshell") => {
-            Ok(ControlCenterState::empty().to_json())
+        Some("waybar") => {
+            let cfg = load_config();
+            Ok(WaybarStatus::from_model(&live_model(&cfg)).to_json())
+        }
+        Some("state") | Some("status-json") => {
+            let cfg = load_config();
+            Ok(ControlCenterState::from_model(&live_model(&cfg)).to_json())
+        }
+        Some("control-center") | Some("quickshell") => {
+            let cfg = load_config();
+            wlterm_ui::open(&cfg).map_err(|err| err.to_string())?;
+            Ok(String::new())
         }
         Some("prompt-name") => {
             Ok(ShellNamePrompt::new(args.get(1).map_or("", String::as_str)).to_json())
@@ -81,7 +94,83 @@ fn run(args: Vec<String>) -> Result<String, String> {
 }
 
 fn help() -> String {
-    "d2b-wlterm\n\nCommands:\n  name [seed]\n  waybar\n  state|control-center|quickshell\n  prompt-name [shell]\n  already-attached [focus-existing|prompt|force-open]\n  list <vm>\n  create <vm> [shell]\n  open <vm> <shell> [--force]\n  stop <vm> <shell> --confirm\n  config\n  async-error".to_string()
+    "d2b-wlterm\n\nCommands:\n  name [seed]\n  waybar\n  state|status-json\n  control-center|quickshell\n  prompt-name [shell]\n  already-attached [focus-existing|prompt|force-open]\n  list <vm>\n  create <vm> [shell]\n  open <vm> <shell> [--force]\n  stop <vm> <shell> --confirm\n  config\n  async-error".to_string()
+}
+
+fn load_config() -> Config {
+    let Some(path) = config_path() else {
+        return Config::default();
+    };
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| toml::from_str::<Config>(&text).ok())
+        .unwrap_or_default()
+}
+
+fn config_path() -> Option<std::path::PathBuf> {
+    if let Some(path) = env::var_os("D2B_WLTERM_CONFIG") {
+        return Some(path.into());
+    }
+    if let Some(base) = env::var_os("XDG_CONFIG_HOME") {
+        return Some(std::path::PathBuf::from(base).join("d2b-wlterm/config.toml"));
+    }
+    env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join(".config/d2b-wlterm/config.toml"))
+}
+
+fn live_model(config: &Config) -> Model {
+    let mut model = Model::new(config.clone());
+    if env::var_os("D2B_WLTERM_TEST_IDLE").is_some() {
+        return model;
+    }
+    let boundary = D2bActionBoundary::new(wlterm_d2b::D2bClientConfig {
+        public_socket_path: config.public_socket_path.clone(),
+        ..Default::default()
+    });
+    let mut vms = Vec::new();
+    for candidate in list_running_vms() {
+        let vm = match VmId::new(candidate) {
+            Ok(vm) => vm,
+            Err(_) => continue,
+        };
+        let outcome = boundary.execute_blocking(PlannedAction::ListSessions { vm: vm.clone() });
+        let Ok(D2bActionOutcome::Listed { sessions, .. }) = outcome else {
+            continue;
+        };
+        let mut summary = VmSummary::new(vm, VmPowerState::Online);
+        summary.sessions = sessions;
+        vms.push(summary);
+    }
+    model.apply(ModelEvent::VmSnapshot { vms });
+    model
+}
+
+fn list_running_vms() -> Vec<String> {
+    let output = Command::new("d2b")
+        .args(["vm", "list"])
+        .stdin(Stdio::null())
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let vm = parts.next()?;
+            let state = parts.next().unwrap_or("unknown");
+            if state == "running" && !vm.starts_with("sys-") {
+                Some(vm.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn run_list(vm: Option<&String>) -> Result<String, String> {
@@ -112,21 +201,17 @@ fn run_create(vm: Option<&String>, name: Option<&String>) -> Result<String, Stri
         Some(name) => parse_shell_name(Some(name))?,
         None => FriendlyName::generate().map_err(|_| "unable to allocate a friendly name")?,
     };
-    attach_then_disconnect(PlannedAction::AttachShell {
-        vm,
-        name: Some(name),
-        force: false,
-    })
+    let resolved = ensure_shell(&vm, &name, false)?;
+    spawn_terminal(&load_config(), &vm, &resolved)?;
+    Ok(format!("opened={}", resolved.as_str()))
 }
 
 fn run_open(vm: Option<&String>, name: Option<&String>, force: bool) -> Result<String, String> {
     let vm = parse_vm(vm)?;
     let name = parse_shell_name(name)?;
-    attach_then_disconnect(PlannedAction::AttachShell {
-        vm,
-        name: Some(name),
-        force,
-    })
+    let resolved = ensure_shell(&vm, &name, force)?;
+    spawn_terminal(&load_config(), &vm, &resolved)?;
+    Ok(format!("opened={}", resolved.as_str()))
 }
 
 fn run_stop(vm: Option<&String>, name: Option<&String>, confirmed: bool) -> Result<String, String> {
@@ -145,7 +230,12 @@ fn run_stop(vm: Option<&String>, name: Option<&String>, confirmed: bool) -> Resu
     }
 }
 
-fn attach_then_disconnect(action: PlannedAction) -> Result<String, String> {
+fn ensure_shell(vm: &VmId, name: &FriendlyName, force: bool) -> Result<FriendlyName, String> {
+    let action = PlannedAction::AttachShell {
+        vm: vm.clone(),
+        name: Some(name.clone()),
+        force,
+    };
     let outcome = D2bActionBoundary::new(Default::default())
         .execute_blocking(action)
         .map_err(|err| err.to_string())?;
@@ -158,7 +248,63 @@ fn attach_then_disconnect(action: PlannedAction) -> Result<String, String> {
         return Err("unexpected open result".to_string());
     };
     futures::executor::block_on(attached.close_attach()).map_err(|err| err.to_string())?;
-    Ok(format!("opened={}", resolved_name.as_str()))
+    Ok(resolved_name)
+}
+
+fn spawn_terminal(config: &Config, vm: &VmId, shell: &FriendlyName) -> Result<(), String> {
+    let terminal_command = render_terminal_command(config, vm, shell);
+    let Some((terminal_program, terminal_args)) = terminal_command.split_first() else {
+        return Err("wezterm_command must not be empty".to_string());
+    };
+    let proxy_command = render_proxy_command(config, vm, terminal_program, terminal_args);
+    let Some((program, args)) = proxy_command.split_first() else {
+        return Err("wayland_proxy_command must not be empty".to_string());
+    };
+    Command::new(program)
+        .args(args)
+        .env("WEEZTERM_D2B_SHELL_NAME", shell.as_str())
+        .env("WEEZTERM_D2B_BOUND_VM", vm.as_str())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| format!("failed to launch terminal: {err}"))?;
+    Ok(())
+}
+
+fn render_proxy_command(
+    config: &Config,
+    vm: &VmId,
+    terminal_program: &str,
+    terminal_args: &[String],
+) -> Vec<String> {
+    let mut command = config.wayland_proxy_command.clone();
+    command.extend([
+        "--host-terminal".to_string(),
+        "--vm-name".to_string(),
+        vm.as_str().to_string(),
+        "--border-enable".to_string(),
+        "--border-label".to_string(),
+        vm.as_str().to_string(),
+        "--terminal-program".to_string(),
+        terminal_program.to_string(),
+        "--".to_string(),
+    ]);
+    command.extend(terminal_args.iter().cloned());
+    command
+}
+
+fn render_terminal_command(config: &Config, vm: &VmId, shell: &FriendlyName) -> Vec<String> {
+    let domain = format!("d2b-{}", vm.as_str());
+    config
+        .wezterm_command
+        .iter()
+        .map(|part| {
+            part.replace("{vm}", vm.as_str())
+                .replace("{shell}", shell.as_str())
+                .replace("{domain}", &domain)
+        })
+        .collect()
 }
 
 fn parse_vm(value: Option<&String>) -> Result<VmId, String> {
@@ -174,9 +320,14 @@ fn parse_shell_name(value: Option<&String>) -> Result<FriendlyName, String> {
 fn default_config_toml() -> String {
     let cfg = Config::default();
     format!(
-        "public_socket_path = \"{}\"\nwezterm_command = [{}]\nrefresh_interval_seconds = {}\n\n[ui]\ndefault_open_behavior = \"focus-existing\"\nstop_confirmation = {}\nasync_error_display = \"notification\"\n\n[waybar]\nenable = {}\nmodule_name = \"{}\"\n\n[quickshell]\nenable = false\ncontrol_center_state_path = \"$XDG_RUNTIME_DIR/d2b-wlterm/control-center.json\"",
+        "public_socket_path = \"{}\"\nwezterm_command = [{}]\nwayland_proxy_command = [{}]\nrefresh_interval_seconds = {}\n\n[ui]\ndefault_open_behavior = \"focus-existing\"\nstop_confirmation = {}\nasync_error_display = \"notification\"\n\n[waybar]\nenable = {}\nmodule_name = \"{}\"\n\n[quickshell]\nenable = false\ncontrol_center_state_path = \"$XDG_RUNTIME_DIR/d2b-wlterm/control-center.json\"",
         cfg.public_socket_path,
         cfg.wezterm_command
+            .iter()
+            .map(|part| format!("\"{}\"", part.replace('"', "\\\"")))
+            .collect::<Vec<_>>()
+            .join(", "),
+        cfg.wayland_proxy_command
             .iter()
             .map(|part| format!("\"{}\"", part.replace('"', "\\\"")))
             .collect::<Vec<_>>()
@@ -240,10 +391,12 @@ mod tests {
 
     #[test]
     fn waybar_command_outputs_json() {
+        env::set_var("D2B_WLTERM_TEST_IDLE", "1");
         assert_eq!(
             run(vec!["waybar".into()]).unwrap(),
             WaybarStatus::idle().to_json()
         );
+        env::remove_var("D2B_WLTERM_TEST_IDLE");
     }
 
     #[test]

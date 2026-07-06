@@ -2,7 +2,7 @@
 
 `d2b-wlterm` is a small user-session companion for d2b desktop workflows. It is
 not a privileged control plane. It should talk to d2b through the public daemon
-socket, then launch or focus a WezTerm window using user-session state.
+socket, then launch or focus a WeezTerm window using user-session state.
 
 The core model is a reducer over VM snapshots and UI events. It keeps offline
 VMs visible but disables shell list, create, and open actions until the VM is

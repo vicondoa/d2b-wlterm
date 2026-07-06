@@ -11,6 +11,7 @@ let
   baseSettings = {
     public_socket_path = cfg.publicSocketPath;
     wezterm_command = cfg.weztermCommand;
+    wayland_proxy_command = cfg.waylandProxyCommand;
     refresh_interval_seconds = cfg.refreshIntervalSeconds;
     ui = {
       default_open_behavior = cfg.defaultOpenBehavior;
@@ -71,8 +72,14 @@ in
 
     weztermCommand = lib.mkOption {
       type = lib.types.listOf lib.types.str;
-      default = [ "wezterm" "start" "--" ];
-      description = "Command prefix used when opening a terminal window.";
+      default = [ "weezterm" "start" "--" ];
+      description = "Command prefix used when opening a WeezTerm window.";
+    };
+
+    waylandProxyCommand = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ "d2b-wayland-proxy" ];
+      description = "Command prefix for the d2b Wayland proxy used to wrap WeezTerm windows with VM identity rails.";
     };
 
     refreshIntervalSeconds = lib.mkOption {

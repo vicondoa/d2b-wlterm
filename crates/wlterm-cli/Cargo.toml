@@ -16,6 +16,7 @@ wlterm-core.workspace = true
 wlterm-d2b.workspace = true
 wlterm-waybar.workspace = true
 wlterm-ui.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 d2b-toolkit-core.workspace = true

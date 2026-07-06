@@ -12,6 +12,7 @@ use std::fmt;
 pub struct Config {
     pub public_socket_path: String,
     pub wezterm_command: Vec<String>,
+    pub wayland_proxy_command: Vec<String>,
     pub refresh_interval_seconds: u64,
     pub ui: UiConfig,
     pub waybar: WaybarConfig,
@@ -22,7 +23,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             public_socket_path: default_public_socket_path(),
-            wezterm_command: vec!["wezterm".into(), "start".into(), "--".into()],
+            wezterm_command: vec!["weezterm".into(), "start".into(), "--".into()],
+            wayland_proxy_command: vec!["d2b-wayland-proxy".into()],
             refresh_interval_seconds: 5,
             ui: UiConfig::default(),
             waybar: WaybarConfig::default(),
