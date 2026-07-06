@@ -27,8 +27,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   rendering.
 - Native CLI integration coverage that drives `d2b-wlterm list` over a real
   AF_UNIX public-socket frame exchange instead of a fake in-memory transport.
+- Quickshell control center that opens from Waybar, shows shell-capable VMs and
+  their active terminals, and dispatches create/open/confirmed-stop actions.
+- WeezTerm launches are wrapped with `d2b-wayland-proxy --host-terminal` so
+  terminal windows receive VM identity rails and d2b clipboard policy.
 
 ### Changed
 
 - Nix flake packaging consumes `d2b-toolkit` from a GitHub flake input with
   `nixpkgs` following the caller, avoiding developer-local absolute paths.
+- VM cards in the control center use `/etc/d2b/ui-colors.json` so the app
+  accents each VM with the same d2b color used by the Wayland proxy rail.

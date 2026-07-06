@@ -1,4 +1,12 @@
-//! UI state concepts for d2b-wlterm frontends.
+//! UI state concepts and Quickshell frontend for d2b-wlterm.
+
+use std::{
+    env, fs,
+    io::Write as _,
+    os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _},
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -65,6 +73,508 @@ pub fn decide_open(
         },
     }
 }
+
+const QML_FILE: &str = "shell.qml";
+const PID_FILE: &str = "quickshell.pid";
+const SIGTERM: i32 = 15;
+
+unsafe extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProcessIdentity {
+    pid: u32,
+    start_time_ticks: u64,
+}
+
+pub fn open(_config: &wlterm_core::Config) -> Result<(), String> {
+    let dir = runtime_dir();
+    fs::create_dir_all(&dir).map_err(|err| format!("failed to create runtime dir: {err}"))?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+        .map_err(|err| format!("failed to secure runtime dir: {err}"))?;
+
+    let pid_path = dir.join(PID_FILE);
+    if let Some(identity) = read_live_frontend(&pid_path, &dir) {
+        // SAFETY: pid is validated against /proc start_time and cmdline before signaling.
+        let _ = unsafe { kill(identity.pid as i32, SIGTERM) };
+        let _ = fs::remove_file(&pid_path);
+        return Ok(());
+    }
+
+    let qml_path = materialize_qml(&dir)?;
+    let backend =
+        env::current_exe().map_err(|err| format!("failed to locate d2b-wlterm backend: {err}"))?;
+    let theme_json = fs::read_to_string("/etc/d2b/ui-colors.json").unwrap_or_else(|_| "{}".into());
+    let quickshell = quickshell_program()
+        .ok_or_else(|| "failed to find quickshell frontend binary".to_string())?;
+    let mut child = Command::new(quickshell)
+        .arg("--path")
+        .arg(&qml_path)
+        .arg("--no-duplicate")
+        .env("D2B_WLTERM_BIN", backend)
+        .env("D2B_WLTERM_THEME_JSON", theme_json)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| format!("failed to launch quickshell: {err}"))?;
+    let identity = process_identity(child.id())
+        .ok_or_else(|| "failed to read quickshell process identity".to_string())?;
+    write_pid_record(&pid_path, identity)?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        if read_pid_record(&pid_path).is_some_and(|current| current == identity) {
+            let _ = fs::remove_file(&pid_path);
+        }
+    });
+    Ok(())
+}
+
+fn runtime_dir() -> PathBuf {
+    env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("TMPDIR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("d2b-wlterm")
+        .join("quickshell")
+}
+
+fn quickshell_program() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("D2B_WLTERM_QUICKSHELL") {
+        return Some(PathBuf::from(path));
+    }
+    if let Some(path) = find_in_path("quickshell") {
+        return Some(path);
+    }
+    let system = PathBuf::from("/run/current-system/sw/bin/quickshell");
+    if system.is_file() {
+        return Some(system);
+    }
+    let entries = fs::read_dir("/nix/store").ok()?;
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("bin/quickshell"))
+        .find(|path| path.is_file())
+}
+
+fn find_in_path(binary: &str) -> Option<PathBuf> {
+    env::var_os("PATH").and_then(|path| {
+        env::split_paths(&path)
+            .map(|dir| dir.join(binary))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+fn materialize_qml(dir: &Path) -> Result<PathBuf, String> {
+    let path = dir.join(QML_FILE);
+    write_private_file(&path, QML_SOURCE.as_bytes())?;
+    Ok(path)
+}
+
+fn write_pid_record(path: &Path, identity: ProcessIdentity) -> Result<(), String> {
+    write_private_file(
+        path,
+        format!("{} {}\n", identity.pid, identity.start_time_ticks).as_bytes(),
+    )
+}
+
+fn write_private_file(path: &Path, content: &[u8]) -> Result<(), String> {
+    let tmp = path.with_extension("tmp");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(&tmp)
+        .map_err(|err| format!("failed to open {}: {err}", tmp.display()))?;
+    file.write_all(content)
+        .map_err(|err| format!("failed to write {}: {err}", tmp.display()))?;
+    file.sync_all()
+        .map_err(|err| format!("failed to sync {}: {err}", tmp.display()))?;
+    fs::rename(&tmp, path).map_err(|err| format!("failed to install {}: {err}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|err| format!("failed to secure {}: {err}", path.display()))?;
+    Ok(())
+}
+
+fn read_pid_record(path: &Path) -> Option<ProcessIdentity> {
+    let text = fs::read_to_string(path).ok()?;
+    let mut parts = text.split_whitespace();
+    Some(ProcessIdentity {
+        pid: parts.next()?.parse().ok()?,
+        start_time_ticks: parts.next()?.parse().ok()?,
+    })
+}
+
+fn read_live_frontend(path: &Path, runtime_dir: &Path) -> Option<ProcessIdentity> {
+    let identity = read_pid_record(path)?;
+    let live = process_identity(identity.pid)?;
+    if live == identity && cmdline_matches_quickshell(identity.pid, runtime_dir) {
+        Some(identity)
+    } else {
+        let _ = fs::remove_file(path);
+        None
+    }
+}
+
+fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    let stat =
+        fs::read_to_string(PathBuf::from("/proc").join(pid.to_string()).join("stat")).ok()?;
+    let after_comm = stat.rsplit_once(") ")?.1;
+    let start_time_ticks = after_comm.split_whitespace().nth(19)?.parse().ok()?;
+    Some(ProcessIdentity {
+        pid,
+        start_time_ticks,
+    })
+}
+
+fn cmdline_matches_quickshell(pid: u32, runtime_dir: &Path) -> bool {
+    let bytes =
+        fs::read(PathBuf::from("/proc").join(pid.to_string()).join("cmdline")).unwrap_or_default();
+    let args: Vec<String> = bytes
+        .split(|b| *b == 0)
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| std::str::from_utf8(part).ok().map(ToOwned::to_owned))
+        .collect();
+    let qml_path = runtime_dir.join(QML_FILE).display().to_string();
+    args.first()
+        .and_then(|arg| Path::new(arg).file_name())
+        .is_some_and(|name| name == "quickshell")
+        && args
+            .windows(2)
+            .any(|pair| pair == ["--path", qml_path.as_str()])
+        && args.iter().any(|arg| arg == "--no-duplicate")
+}
+
+const QML_SOURCE: &str = r##"
+    //@ pragma StateDir $XDG_STATE_HOME/d2b-wlterm/quickshell
+    //@ pragma IconTheme Adwaita
+
+    import QtQuick
+    import Quickshell
+    import Quickshell.Io
+
+    ShellRoot {
+      id: root
+      property string backend: Quickshell.env("D2B_WLTERM_BIN") || "d2b-wlterm"
+      property var state: ({ vms: [], activeShells: 0, hasError: false, errors: [] })
+      property bool busy: false
+      property string message: ""
+      property bool failed: false
+      property string confirmKey: ""
+      property real panelTopMargin: 24
+      property real panelRightMargin: 24
+      property var theme: parseJsonObject(Quickshell.env("D2B_WLTERM_THEME_JSON"))
+
+      function reload() { statusProc.exec([backend, "status-json"]) }
+      function action(args) {
+        busy = true
+        failed = false
+        message = runningMessage(args)
+        actionProc.args = args
+        actionProc.exec([backend].concat(args))
+      }
+      function runningMessage(args) {
+        const verb = args[0] || "action"
+        if (verb === "create") return "Creating shell in " + args[1] + "..."
+        if (verb === "open") return "Attaching " + args[2] + "..."
+        if (verb === "stop") return "Stopping " + args[2] + "..."
+        return "Working..."
+      }
+      function successMessage(args) {
+        const verb = args[0] || "action"
+        if (verb === "create") return "Created terminal"
+        if (verb === "open") return "Attached terminal"
+        if (verb === "stop") return "Stopped terminal"
+        return "Done"
+      }
+      function statusText() {
+        if (message.length > 0) return message
+        if (busy) return "working..."
+        if ((state.vms || []).length === 0) return "no shell-capable VMs"
+        return root.shellCountLabel(state.activeShells || 0, "active shell")
+      }
+      function shellCountLabel(count, singular) {
+        return String(count) + " " + singular + (count === 1 ? "" : "s")
+      }
+      function parseJsonObject(text) {
+        if (!text || text.length === 0) return ({})
+        try {
+          const parsed = JSON.parse(text)
+          return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : ({})
+        } catch (e) {
+          return ({})
+        }
+      }
+      function isHexColor(value) {
+        return typeof value === "string" && /^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(value)
+      }
+      function shellColor(name, fallback) { return fallback }
+      function vmAccent(vm) {
+        const id = vm && (vm.id || vm.label)
+        const vms = theme.vms || ({})
+        const envs = theme.envs || ({})
+        if (id && vms[id] && vms[id].border && isHexColor(vms[id].border.active)) return vms[id].border.active
+        if (vm && vm.env && envs[vm.env] && isHexColor(envs[vm.env].accent)) return envs[vm.env].accent
+        if (theme.host && isHexColor(theme.host.accent)) return theme.host.accent
+        return "#89b4fa"
+      }
+      function stateColor(name) {
+        if (name === "running" || name === "detached") return "#a6e3a1"
+        if (name === "attached") return "#89b4fa"
+        if (name === "error") return "#f38ba8"
+        return "#9399b2"
+      }
+      function screenWidth() { return panel.screen ? panel.screen.width : 1280 }
+      function screenHeight() { return panel.screen ? panel.screen.height : 1080 }
+      function clamp(value, min, max) { return Math.max(min, Math.min(max, value)) }
+      function movePanel(dx, dy) {
+        panelRightMargin = clamp(panelRightMargin - dx, 4, Math.max(4, screenWidth() - panel.width - 4))
+        panelTopMargin = clamp(panelTopMargin + dy, 4, Math.max(4, screenHeight() - panel.height - 4))
+      }
+      function confirmStop(vm, shell) {
+        const key = "stop:" + vm + ":" + shell
+        if (confirmKey === key) {
+          confirmKey = ""
+          action(["stop", vm, shell, "--confirm"])
+        } else {
+          confirmKey = key
+          message = "Click stop again to kill " + shell
+          confirmTimer.restart()
+        }
+      }
+      function panelContentHeight() { return 96 + list.implicitHeight + (message.length > 0 ? 36 : 0) }
+
+      Process {
+        id: statusProc
+        stdout: StdioCollector {
+          onStreamFinished: {
+            try { root.state = JSON.parse(this.text) }
+            catch (e) { root.state = ({ vms: [], activeShells: 0, hasError: true, errors: [{ detail: String(e) }] }) }
+          }
+        }
+        stderr: StdioCollector {}
+        onExited: if (!actionProc.running) root.busy = false
+      }
+
+      Process {
+        id: actionProc
+        property string out: ""
+        property string err: ""
+        property var args: []
+        stdout: StdioCollector { onStreamFinished: actionProc.out = this.text.trim() }
+        stderr: StdioCollector { onStreamFinished: actionProc.err = this.text.trim() }
+        onExited: (exitCode, exitStatus) => {
+          const ok = exitCode === 0 && exitStatus === 0
+          root.failed = !ok
+          if (!ok) root.message = actionProc.err.length > 0 ? actionProc.err : (actionProc.out.length > 0 ? actionProc.out : "Action failed")
+          else root.message = actionProc.out.length > 0 ? actionProc.out : root.successMessage(actionProc.args)
+          actionProc.out = ""
+          actionProc.err = ""
+          actionProc.args = []
+          root.busy = false
+          clearMessage.restart()
+          root.reload()
+        }
+      }
+
+      Timer { id: clearMessage; interval: 2600; repeat: false; onTriggered: if (!root.busy) root.message = "" }
+      Timer { id: confirmTimer; interval: 2400; repeat: false; onTriggered: { root.confirmKey = ""; if (!root.busy) root.message = "" } }
+      Timer { interval: 2500; running: true; repeat: true; triggeredOnStart: true; onTriggered: if (!statusProc.running && !actionProc.running) root.reload() }
+
+      PanelWindow {
+        id: panel
+        visible: true
+        focusable: true
+        aboveWindows: true
+        exclusiveZone: 0
+        implicitWidth: 560
+        implicitHeight: Math.min(Math.max(330, root.panelContentHeight()), Math.floor(root.screenHeight() * 0.62))
+        color: "transparent"
+        surfaceFormat { opaque: false }
+        anchors { top: true; right: true }
+        margins { top: root.panelTopMargin; right: root.panelRightMargin }
+
+        Rectangle {
+          anchors.fill: parent
+          radius: 20
+          color: "#0f1117"
+          border.color: "#2a2d35"
+          border.width: 1
+          clip: true
+
+          Column {
+            x: 20
+            y: 18
+            width: parent.width - 40
+            height: parent.height - 36
+            spacing: 14
+
+            Item {
+              width: parent.width
+              height: 38
+              MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.LeftButton
+                property real lastX: 0
+                property real lastY: 0
+                onPressed: (mouse) => { lastX = mouse.x; lastY = mouse.y }
+                onPositionChanged: (mouse) => { if (pressed) root.movePanel(mouse.x - lastX, mouse.y - lastY) }
+              }
+              Text {
+                anchors.centerIn: parent
+                text: "d2b terminals"
+                color: "#ffffff"
+                font.pixelSize: 20
+                font.bold: true
+              }
+              Row {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 8
+                IconButton { text: "refresh"; tooltip: "Refresh terminals"; enabled: !root.busy; onClicked: root.reload() }
+              }
+            }
+
+            Rectangle { width: parent.width; height: 1; color: "#2a2d35" }
+
+            Row {
+              width: parent.width
+              height: 24
+              spacing: 10
+              Text { text: (root.state.vms || []).length + " VM(s)"; color: "#ffffff"; font.pixelSize: 15; font.bold: true }
+              Text { text: root.statusText(); color: root.failed ? "#f38ba8" : "#9399b2"; font.pixelSize: 14; elide: Text.ElideRight; width: parent.width - 92 }
+            }
+
+            Rectangle {
+              visible: root.message.length > 0 && !root.busy
+              width: parent.width
+              height: visible ? 28 : 0
+              radius: 10
+              color: root.failed ? "#2e1a1a" : "#1a2e1a"
+              border.color: root.failed ? "#f38ba8" : "#a6e3a1"
+              Text { anchors.fill: parent; anchors.margins: 7; text: root.message; color: root.failed ? "#f38ba8" : "#a6e3a1"; font.pixelSize: 11; elide: Text.ElideRight }
+            }
+
+            Flickable {
+              width: parent.width
+              height: parent.height - y
+              contentWidth: width
+              contentHeight: list.implicitHeight
+              clip: true
+              boundsBehavior: Flickable.StopAtBounds
+
+              Column {
+                id: list
+                width: parent.width
+                spacing: 8
+
+                Repeater {
+                  model: root.state.vms || []
+                  Rectangle {
+                    id: vmCard
+                    width: list.width
+                    height: card.implicitHeight + 18
+                    radius: 15
+                    color: "#16181d"
+                    border.color: root.vmAccent(vm)
+                    border.width: 1
+                    property var vm: modelData
+
+                    Rectangle {
+                      anchors.left: parent.left
+                      anchors.top: parent.top
+                      anchors.bottom: parent.bottom
+                      width: 7
+                      radius: 15
+                      color: root.vmAccent(vm)
+                    }
+
+                    Column {
+                      id: card
+                      anchors.left: parent.left
+                      anchors.right: parent.right
+                      anchors.top: parent.top
+                      anchors.margins: 12
+                      anchors.leftMargin: 18
+                      spacing: 10
+
+                      Row {
+                        width: parent.width
+                        height: 38
+                        spacing: 10
+                          Text { text: "●"; color: root.vmAccent(vm); font.pixelSize: 18; width: 22; horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter }
+                          Column {
+                            width: parent.width - 158
+                            anchors.verticalCenter: parent.verticalCenter
+                            Text { text: vm.label || vm.id; color: "#ffffff"; font.pixelSize: 17; font.bold: true; elide: Text.ElideRight; width: parent.width }
+                            Text { text: root.shellCountLabel(vm.activeShells || 0, "shell"); color: "#9399b2"; font.pixelSize: 13 }
+                          }
+                          ActionButton { label: "new"; tooltip: "Create a named shell and open it"; accent: root.vmAccent(vm); enabled: !root.busy; onClicked: root.action(["create", vm.id]) }
+                        }
+
+                        Repeater {
+                          model: vm.shells || []
+                          Rectangle {
+                            width: card.width
+                            height: 42
+                            radius: 11
+                            color: "#0d0f14"
+                            border.color: modelData.attached ? root.vmAccent(vm) : "#313645"
+                            border.width: 1
+                          Row {
+                            anchors.fill: parent
+                            anchors.margins: 7
+                            spacing: 8
+                            Text { text: modelData.attached ? "attached" : "detached"; color: modelData.attached ? root.vmAccent(vm) : "#a6e3a1"; font.pixelSize: 12; font.bold: true; width: 72; anchors.verticalCenter: parent.verticalCenter }
+                            Text { text: modelData.name; color: "#ffffff"; font.pixelSize: 14; elide: Text.ElideRight; width: parent.width - 210; anchors.verticalCenter: parent.verticalCenter }
+                            ActionButton { label: modelData.attached ? "attach" : "open"; tooltip: "Attach to " + modelData.name; accent: root.vmAccent(vm); enabled: !root.busy; onClicked: root.action(["open", vm.id, modelData.name]) }
+                            ActionButton { label: root.confirmKey === ("stop:" + vm.id + ":" + modelData.name) ? "sure?" : "stop"; tooltip: "Stop " + modelData.name; enabled: !root.busy; danger: true; onClicked: root.confirmStop(vm.id, modelData.name) }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      component ActionButton: Rectangle {
+        property string label: ""
+        property string tooltip: ""
+        property bool danger: false
+        property string accent: "#89b4fa"
+        signal clicked()
+        width: Math.max(62, buttonText.implicitWidth + 24)
+        height: 28
+        radius: 999
+        color: enabled ? (danger ? "#2e1a1a" : "#1d2430") : "#16181d"
+        border.color: enabled ? (danger ? "#f38ba8" : accent) : "#313645"
+        border.width: 2
+        opacity: enabled ? 1.0 : 0.45
+        Text { id: buttonText; anchors.centerIn: parent; text: label; color: danger ? "#f38ba8" : "#cdd6f4"; font.pixelSize: 13; font.bold: true }
+        MouseArea { anchors.fill: parent; hoverEnabled: true; enabled: parent.enabled; onClicked: parent.clicked() }
+      }
+
+      component IconButton: Rectangle {
+        property string text: ""
+        property string tooltip: ""
+        signal clicked()
+        width: 28
+        height: 24
+        radius: 8
+        color: enabled ? "#1d2430" : "#16181d"
+        border.color: enabled ? "#89b4fa" : "#313645"
+        border.width: 1
+        Text { anchors.centerIn: parent; text: parent.text; color: "#cdd6f4"; font.pixelSize: 14; font.family: "Material Symbols Rounded" }
+        MouseArea { anchors.fill: parent; enabled: parent.enabled; onClicked: parent.clicked() }
+      }
+    }
+    "##;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct StopRequest {
