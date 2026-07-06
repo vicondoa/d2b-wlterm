@@ -82,6 +82,12 @@ impl D2bActionBoundary {
                     name: to_toolkit_shell_name(name),
                 }))
             }
+            PlannedAction::DetachShell { vm, name } => {
+                Some(ShellOp::Detach(d2b_toolkit_core::ShellDetachArgs {
+                    vm: vm.as_str().to_string(),
+                    name: Some(to_toolkit_shell_name(name)),
+                }))
+            }
             PlannedAction::RefreshVms
             | PlannedAction::FocusExistingShell { .. }
             | PlannedAction::PromptAlreadyAttached { .. }
@@ -197,6 +203,22 @@ impl D2bActionBoundary {
                     .await
                     .map_err(|err| D2bClientError::from_client_error("stop", trace.clone(), err))?;
                 Ok(D2bActionOutcome::Killed {
+                    client,
+                    vm,
+                    name,
+                    result,
+                    trace,
+                })
+            }
+            PlannedAction::DetachShell { vm, name } => {
+                let mut client = client;
+                let result = client
+                    .shell_detach(vm.as_str().to_string(), Some(to_toolkit_shell_name(&name)))
+                    .await
+                    .map_err(|err| {
+                        D2bClientError::from_client_error("detach", trace.clone(), err)
+                    })?;
+                Ok(D2bActionOutcome::Detached {
                     client,
                     vm,
                     name,
@@ -568,6 +590,13 @@ pub enum D2bActionOutcome<T> {
         result: ShellKillResult,
         trace: ActionTrace,
     },
+    Detached {
+        client: PublicSocketClient<T>,
+        vm: VmId,
+        name: FriendlyName,
+        result: d2b_toolkit_core::ShellDetachResult,
+        trace: ActionTrace,
+    },
 }
 
 impl<T> fmt::Debug for D2bActionOutcome<T> {
@@ -619,6 +648,15 @@ impl<T> fmt::Debug for D2bActionOutcome<T> {
                 .field("name", &"<redacted>")
                 .field("killed", &result.killed)
                 .field("state", &result.state)
+                .field("trace", trace)
+                .finish(),
+            Self::Detached {
+                vm, result, trace, ..
+            } => f
+                .debug_struct("Detached")
+                .field("vm", vm)
+                .field("name", &"<redacted>")
+                .field("detached", &result.detached)
                 .field("trace", trace)
                 .finish(),
         }
