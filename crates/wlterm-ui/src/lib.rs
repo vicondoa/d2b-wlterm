@@ -280,6 +280,7 @@ const QML_SOURCE: &str = r##"
         const verb = args[0] || "action"
         if (verb === "create") return "Creating shell in " + args[1] + "..."
         if (verb === "open") return "Attaching " + args[2] + "..."
+        if (verb === "detach") return "Detaching " + args[2] + "..."
         if (verb === "stop") return "Stopping " + args[2] + "..."
         return "Working..."
       }
@@ -287,6 +288,7 @@ const QML_SOURCE: &str = r##"
         const verb = args[0] || "action"
         if (verb === "create") return "Created terminal"
         if (verb === "open") return "Attached terminal"
+        if (verb === "detach") return "Detached terminal"
         if (verb === "stop") return "Stopped terminal"
         return "Done"
       }
@@ -346,6 +348,7 @@ const QML_SOURCE: &str = r##"
           confirmTimer.restart()
         }
       }
+      function maxPanelHeight() { return Math.floor(root.screenHeight() * 0.82) }
       function panelContentHeight() { return 96 + list.implicitHeight + (message.length > 0 ? 36 : 0) }
 
       Process {
@@ -392,7 +395,7 @@ const QML_SOURCE: &str = r##"
         aboveWindows: true
         exclusiveZone: 0
         implicitWidth: 420
-        implicitHeight: Math.min(Math.max(240, root.panelContentHeight()), Math.floor(root.screenHeight() * 0.5))
+        implicitHeight: Math.min(Math.max(240, root.panelContentHeight()), root.maxPanelHeight())
         color: "transparent"
         surfaceFormat { opaque: false }
         anchors { top: true; right: true }
@@ -521,7 +524,7 @@ const QML_SOURCE: &str = r##"
                               spacing: 6
                               StatusIcon { icon: modelData.attached ? "link" : "link_off"; accent: modelData.attached ? "#ffffff" : "#9399b2"; tooltip: modelData.attached ? "attached" : "detached"; }
                               Text { text: modelData.name; color: "#ffffff"; font.pixelSize: 12; elide: Text.ElideRight; width: parent.width - 126; anchors.verticalCenter: parent.verticalCenter }
-                              IconButton { text: "terminal"; tooltip: "Attach to " + modelData.name; enabled: !root.busy; onClicked: root.action(["open", vm.id, modelData.name]) }
+                              IconButton { text: modelData.attached ? "link_off" : "terminal"; tooltip: modelData.attached ? ("Detach " + modelData.name) : ("Attach to " + modelData.name); enabled: !root.busy; onClicked: modelData.attached ? root.action(["detach", vm.id, modelData.name]) : root.action(["open", vm.id, modelData.name]) }
                               IconButton { text: root.confirmKey === ("stop:" + vm.id + ":" + modelData.name) ? "priority_high" : "stop"; tooltip: "Stop " + modelData.name; accent: "#9399b2"; enabled: !root.busy; onClicked: root.confirmStop(vm.id, modelData.name) }
                             }
                           }

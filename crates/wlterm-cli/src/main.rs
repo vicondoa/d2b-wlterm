@@ -75,6 +75,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
             true,
             OpenBehavior::FocusExisting,
         ))),
+        Some("detach") if args.get(1).is_some() => run_detach(args.get(1), args.get(2)),
         Some("stop") if args.get(1).is_some() => run_stop(
             args.get(1),
             args.get(2),
@@ -94,7 +95,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
 }
 
 fn help() -> String {
-    "d2b-wlterm\n\nCommands:\n  name [seed]\n  waybar\n  state|status-json\n  control-center|quickshell\n  prompt-name [shell]\n  already-attached [focus-existing|prompt|force-open]\n  list <vm>\n  create <vm> [shell]\n  open <vm> <shell> [--force]\n  stop <vm> <shell> --confirm\n  config\n  async-error".to_string()
+    "d2b-wlterm\n\nCommands:\n  name [seed]\n  waybar\n  state|status-json\n  control-center|quickshell\n  prompt-name [shell]\n  already-attached [focus-existing|prompt|force-open]\n  list <vm>\n  create <vm> [shell]\n  open <vm> <shell> [--force]\n  detach <vm> <shell>\n  stop <vm> <shell> --confirm\n  config\n  async-error".to_string()
 }
 
 fn load_config() -> Config {
@@ -220,6 +221,7 @@ fn run_stop(vm: Option<&String>, name: Option<&String>, confirmed: bool) -> Resu
     if !confirmed {
         return Err("stop requires --confirm".to_string());
     }
+
     let action = PlannedAction::KillShell { vm, name };
     let outcome = D2bActionBoundary::new(Default::default())
         .execute_blocking(action)
@@ -227,6 +229,18 @@ fn run_stop(vm: Option<&String>, name: Option<&String>, confirmed: bool) -> Resu
     match outcome {
         D2bActionOutcome::Killed { result, .. } => Ok(format!("killed={}", result.killed)),
         _ => Err("unexpected stop result".to_string()),
+    }
+}
+
+fn run_detach(vm: Option<&String>, name: Option<&String>) -> Result<String, String> {
+    let vm = parse_vm(vm)?;
+    let name = parse_shell_name(name)?;
+    let outcome = D2bActionBoundary::new(Default::default())
+        .execute_blocking(PlannedAction::DetachShell { vm, name })
+        .map_err(|err| err.to_string())?;
+    match outcome {
+        D2bActionOutcome::Detached { result, .. } => Ok(format!("detached={}", result.detached)),
+        _ => Err("unexpected detach result".to_string()),
     }
 }
 
@@ -344,7 +358,7 @@ fn color_string(value: &serde_json::Value) -> Option<String> {
 
 fn render_terminal_command(config: &Config, vm: &VmId, shell: &FriendlyName) -> Vec<String> {
     let domain = format!("d2b-{}", vm.as_str());
-    config
+    let mut command: Vec<String> = config
         .wezterm_command
         .iter()
         .map(|part| {
@@ -352,7 +366,41 @@ fn render_terminal_command(config: &Config, vm: &VmId, shell: &FriendlyName) -> 
                 .replace("{shell}", shell.as_str())
                 .replace("{domain}", &domain)
         })
-        .collect()
+        .collect();
+    ensure_close_confirmation(&mut command);
+    ensure_weezterm_domain(&mut command, &domain);
+    command
+}
+
+fn ensure_close_confirmation(command: &mut Vec<String>) {
+    if command
+        .iter()
+        .any(|part| part.contains("window_close_confirmation"))
+    {
+        return;
+    }
+    let insert_at = command
+        .iter()
+        .position(|part| part == "start" || part == "-e")
+        .unwrap_or(command.len());
+    command.splice(
+        insert_at..insert_at,
+        [
+            "--config".to_string(),
+            "window_close_confirmation=\"NeverPrompt\"".to_string(),
+        ],
+    );
+}
+
+fn ensure_weezterm_domain(command: &mut Vec<String>, domain: &str) {
+    if command.iter().any(|part| part == "--domain") {
+        return;
+    }
+    if let Some(index) = command.iter().position(|part| part == "--") {
+        command.splice(index..index, ["--domain".to_string(), domain.to_string()]);
+    } else {
+        command.extend(["--domain".to_string(), domain.to_string()]);
+    }
 }
 
 fn parse_vm(value: Option<&String>) -> Result<VmId, String> {
@@ -445,6 +493,81 @@ mod tests {
             WaybarStatus::idle().to_json()
         );
         env::remove_var("D2B_WLTERM_TEST_IDLE");
+    }
+
+    #[test]
+    fn terminal_command_inserts_domain_before_separator() {
+        let mut cfg = Config::default();
+        cfg.wezterm_command = vec!["weezterm".into(), "start".into(), "--".into()];
+        let vm = VmId::new("dev-general").unwrap();
+        let shell = FriendlyName::from_candidate("quiet-otter").unwrap();
+
+        assert_eq!(
+            render_terminal_command(&cfg, &vm, &shell),
+            vec![
+                "weezterm",
+                "--config",
+                "window_close_confirmation=\"NeverPrompt\"",
+                "start",
+                "--domain",
+                "d2b-dev-general",
+                "--",
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_command_keeps_explicit_domain() {
+        let mut cfg = Config::default();
+        cfg.wezterm_command = vec![
+            "weezterm".into(),
+            "start".into(),
+            "--domain".into(),
+            "{domain}".into(),
+            "--".into(),
+        ];
+        let vm = VmId::new("dev-general").unwrap();
+        let shell = FriendlyName::from_candidate("quiet-otter").unwrap();
+
+        assert_eq!(
+            render_terminal_command(&cfg, &vm, &shell),
+            vec![
+                "weezterm",
+                "--config",
+                "window_close_confirmation=\"NeverPrompt\"",
+                "start",
+                "--domain",
+                "d2b-dev-general",
+                "--",
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_command_keeps_explicit_close_confirmation() {
+        let mut cfg = Config::default();
+        cfg.wezterm_command = vec![
+            "weezterm".into(),
+            "--config".into(),
+            "window_close_confirmation=\"NeverPrompt\"".into(),
+            "start".into(),
+            "--".into(),
+        ];
+        let vm = VmId::new("dev-general").unwrap();
+        let shell = FriendlyName::from_candidate("quiet-otter").unwrap();
+
+        assert_eq!(
+            render_terminal_command(&cfg, &vm, &shell),
+            vec![
+                "weezterm",
+                "--config",
+                "window_close_confirmation=\"NeverPrompt\"",
+                "start",
+                "--domain",
+                "d2b-dev-general",
+                "--",
+            ]
+        );
     }
 
     #[test]

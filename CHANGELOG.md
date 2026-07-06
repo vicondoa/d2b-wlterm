@@ -31,6 +31,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   their active terminals, and dispatches create/open/confirmed-stop actions.
 - WeezTerm launches are wrapped with `d2b-wayland-proxy --host-terminal` so
   terminal windows receive VM identity rails and d2b clipboard policy.
+- Added explicit shell detach handling and launch-time WeezTerm close-confirmation
+  suppression so closing a terminal window detaches from the persistent d2b shell
+  without prompting to kill tabs.
 
 ### Changed
 
@@ -38,3 +41,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `nixpkgs` following the caller, avoiding developer-local absolute paths.
 - VM cards in the control center use `/etc/d2b/ui-colors.json` so the app
   accents each VM with the same d2b color used by the Wayland proxy rail.
+- The control-center popup now expands to content up to a larger screen-bound
+  max height and uses d2b-wlcontrol-matched icon sizing, hover behavior, and
+  borderless white/gray action icons.

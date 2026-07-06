@@ -403,6 +403,7 @@ impl Model {
                     PlannedAction::KillShell { vm, name }
                 }
             }
+            UserIntent::DetachShell { vm, name } => PlannedAction::DetachShell { vm, name },
             UserIntent::ForceOpenSession { vm, name } => {
                 if self.vm_is_online(&vm) {
                     PlannedAction::AttachShell {
@@ -490,6 +491,10 @@ pub enum UserIntent {
         name: FriendlyName,
         confirmed: bool,
     },
+    DetachShell {
+        vm: VmId,
+        name: FriendlyName,
+    },
 }
 
 impl fmt::Debug for UserIntent {
@@ -517,6 +522,11 @@ impl fmt::Debug for UserIntent {
                 .field("vm", vm)
                 .field("name", &"<redacted>")
                 .field("confirmed", confirmed)
+                .finish(),
+            Self::DetachShell { vm, .. } => f
+                .debug_struct("DetachShell")
+                .field("vm", vm)
+                .field("name", &"<redacted>")
                 .finish(),
         }
     }
@@ -549,6 +559,10 @@ pub enum PlannedAction {
         vm: VmId,
         name: FriendlyName,
     },
+    DetachShell {
+        vm: VmId,
+        name: FriendlyName,
+    },
     Disabled {
         reason: DisabledReason,
     },
@@ -565,6 +579,7 @@ impl PlannedAction {
             Self::PromptAlreadyAttached { .. } => "prompt-already-attached",
             Self::PromptStop { .. } => "prompt-stop",
             Self::KillShell { .. } => "kill-shell",
+            Self::DetachShell { .. } => "detach-shell",
             Self::Disabled { reason } => reason.metrics_label_value(),
         }
     }
@@ -598,6 +613,11 @@ impl fmt::Debug for PlannedAction {
                 .finish(),
             Self::KillShell { vm, .. } => f
                 .debug_struct("KillShell")
+                .field("vm", vm)
+                .field("name", &"<redacted>")
+                .finish(),
+            Self::DetachShell { vm, .. } => f
+                .debug_struct("DetachShell")
                 .field("vm", vm)
                 .field("name", &"<redacted>")
                 .finish(),
