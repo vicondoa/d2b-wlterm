@@ -286,12 +286,60 @@ fn render_proxy_command(
         "--border-enable".to_string(),
         "--border-label".to_string(),
         vm.as_str().to_string(),
+    ]);
+    if let Some(colors) = vm_border_colors(vm) {
+        command.extend([
+            "--border-color-active".to_string(),
+            colors.active,
+            "--border-color-inactive".to_string(),
+            colors.inactive,
+            "--border-color-urgent".to_string(),
+            colors.urgent,
+        ]);
+    }
+    command.extend([
         "--terminal-program".to_string(),
         terminal_program.to_string(),
         "--".to_string(),
     ]);
     command.extend(terminal_args.iter().cloned());
     command
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BorderColors {
+    active: String,
+    inactive: String,
+    urgent: String,
+}
+
+fn vm_border_colors(vm: &VmId) -> Option<BorderColors> {
+    let text = fs::read_to_string("/etc/d2b/ui-colors.json").ok()?;
+    let root: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let border = root.get("vms")?.get(vm.as_str())?.get("border")?;
+    let active = color_string(border.get("active")?)?;
+    let inactive = border
+        .get("inactive")
+        .and_then(color_string)
+        .unwrap_or_else(|| active.clone());
+    let urgent = border
+        .get("urgent")
+        .and_then(color_string)
+        .unwrap_or_else(|| active.clone());
+    Some(BorderColors {
+        active,
+        inactive,
+        urgent,
+    })
+}
+
+fn color_string(value: &serde_json::Value) -> Option<String> {
+    let color = value.as_str()?;
+    let bytes = color.as_bytes();
+    let valid = bytes.len() == 7
+        && bytes[0] == b'#'
+        && bytes[1..].iter().all(|byte| byte.is_ascii_hexdigit());
+    valid.then(|| color.to_string())
 }
 
 fn render_terminal_command(config: &Config, vm: &VmId, shell: &FriendlyName) -> Vec<String> {
