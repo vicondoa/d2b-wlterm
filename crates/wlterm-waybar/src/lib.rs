@@ -87,7 +87,7 @@ impl WaybarStatus {
         }
 
         Self {
-            text: format!("d2b {}", counts.active_shells),
+            text: format!("▹_ {}", counts.active_shells),
             tooltip,
             class: class.to_string(),
         }
@@ -116,7 +116,7 @@ mod tests {
     fn idle_status_renders_waybar_json() {
         assert_eq!(
             WaybarStatus::idle().to_json(),
-            r#"{"text":"d2b 0","tooltip":"d2b-wlterm ready","class":"idle"}"#
+            r#"{"text":"▹_ 0","tooltip":"d2b-wlterm ready","class":"idle"}"#
         );
     }
 
@@ -143,7 +143,7 @@ mod tests {
             ..WaybarCounts::default()
         });
 
-        assert_eq!(status.text, "d2b 2");
+        assert_eq!(status.text, "▹_ 2");
         assert_eq!(status.class, "active");
         assert!(status.tooltip.contains("1 attached"));
     }
@@ -200,7 +200,7 @@ mod tests {
         });
 
         let status = WaybarStatus::from_model(&model);
-        assert_eq!(status.text, "d2b 2");
+        assert_eq!(status.text, "▹_ 2");
         assert_eq!(status.class, "error");
         assert!(status.tooltip.contains("2 active"));
         assert!(status.tooltip.contains("1 offline"));
