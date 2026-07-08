@@ -649,8 +649,10 @@ mod tests {
 
     #[test]
     fn terminal_command_inserts_domain_before_separator() {
-        let mut cfg = Config::default();
-        cfg.wezterm_command = vec!["weezterm".into(), "start".into(), "--".into()];
+        let cfg = Config {
+            wezterm_command: vec!["weezterm".into(), "start".into(), "--".into()],
+            ..Default::default()
+        };
         let vm = VmId::new("dev-general").unwrap();
         let shell = FriendlyName::from_candidate("quiet-otter").unwrap();
 
@@ -670,14 +672,16 @@ mod tests {
 
     #[test]
     fn terminal_command_keeps_explicit_domain() {
-        let mut cfg = Config::default();
-        cfg.wezterm_command = vec![
-            "weezterm".into(),
-            "start".into(),
-            "--domain".into(),
-            "{domain}".into(),
-            "--".into(),
-        ];
+        let cfg = Config {
+            wezterm_command: vec![
+                "weezterm".into(),
+                "start".into(),
+                "--domain".into(),
+                "{domain}".into(),
+                "--".into(),
+            ],
+            ..Default::default()
+        };
         let vm = VmId::new("dev-general").unwrap();
         let shell = FriendlyName::from_candidate("quiet-otter").unwrap();
 
@@ -697,14 +701,16 @@ mod tests {
 
     #[test]
     fn terminal_command_keeps_explicit_close_confirmation() {
-        let mut cfg = Config::default();
-        cfg.wezterm_command = vec![
-            "weezterm".into(),
-            "--config".into(),
-            "window_close_confirmation=\"NeverPrompt\"".into(),
-            "start".into(),
-            "--".into(),
-        ];
+        let cfg = Config {
+            wezterm_command: vec![
+                "weezterm".into(),
+                "--config".into(),
+                "window_close_confirmation=\"NeverPrompt\"".into(),
+                "start".into(),
+                "--".into(),
+            ],
+            ..Default::default()
+        };
         let vm = VmId::new("dev-general").unwrap();
         let shell = FriendlyName::from_candidate("quiet-otter").unwrap();
 
