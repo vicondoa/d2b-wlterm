@@ -603,6 +603,51 @@ mod tests {
     }
 
     #[test]
+    fn json_vm_discovery_preserves_canonical_targets_and_filters_non_running() {
+        let value = serde_json::json!([
+            {
+                "name": "dev-general",
+                "status": "running",
+                "canonicalTarget": "dev-general.dev.local.d2b"
+            },
+            {
+                "name": "home-general",
+                "status": "stopped",
+                "canonicalTarget": "home-general.home.local.d2b"
+            },
+            {
+                "name": "sys-dev-net",
+                "status": "running"
+            },
+            {
+                "name": "work-aad",
+                "runtime": { "state": "running" }
+            }
+        ]);
+
+        let discovered = value
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(vm_discovery_from_json)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            discovered,
+            vec![
+                VmDiscovery {
+                    name: "dev-general".to_string(),
+                    canonical_target: Some("dev-general.dev.local.d2b".to_string()),
+                },
+                VmDiscovery {
+                    name: "work-aad".to_string(),
+                    canonical_target: Some("work-aad.local.d2b".to_string()),
+                }
+            ]
+        );
+    }
+
+    #[test]
     fn terminal_command_inserts_domain_before_separator() {
         let mut cfg = Config::default();
         cfg.wezterm_command = vec!["weezterm".into(), "start".into(), "--".into()];
