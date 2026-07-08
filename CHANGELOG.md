@@ -9,6 +9,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Exposed each VM card's `canonicalTarget` in the `state`/`status-json` output
+  so launchers can display realm-aware targets discovered from d2b.
 - Documented flake input alignment for d2b, d2b-toolkit, d2b-wlterm, and
   WeezTerm, including Home Manager wiring and the flake check that evaluates the
   rendered module output.

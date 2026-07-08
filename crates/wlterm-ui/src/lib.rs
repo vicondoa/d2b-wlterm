@@ -704,6 +704,8 @@ impl ControlCenterState {
 #[serde(rename_all = "camelCase")]
 pub struct VmControlCard {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical_target: Option<String>,
     pub label: String,
     pub power_state: VmPowerState,
     pub disabled: bool,
@@ -727,6 +729,7 @@ impl VmControlCard {
 
         Self {
             id: summary.id.as_str().to_string(),
+            canonical_target: summary.canonical_target.clone(),
             label: sanitize_display_label(summary.id.as_str()),
             power_state: summary.power_state,
             disabled,
@@ -1081,6 +1084,7 @@ mod tests {
     #[test]
     fn control_center_counts_active_shells_and_renders_errors() {
         let mut summary = VmSummary::new(vm("work"), VmPowerState::Online);
+        summary.canonical_target = Some("work.example.d2b".to_string());
         summary
             .sessions
             .push(ShellSession::attached(shell("quiet-otter")));
@@ -1096,6 +1100,11 @@ mod tests {
 
         let state = ControlCenterState::from_model(&model);
         assert_eq!(state.active_shells, 2);
+        assert_eq!(
+            state.vms[0].canonical_target.as_deref(),
+            Some("work.example.d2b")
+        );
+        assert!(state.to_json().contains("\"canonicalTarget\""));
         assert!(state.has_error);
         assert_eq!(state.errors[0].title, "d2b-wlterm action failed");
         assert!(!state.to_json().contains("quiet-otter and opaque"));
