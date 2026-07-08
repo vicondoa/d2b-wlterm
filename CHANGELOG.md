@@ -34,6 +34,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Added explicit shell detach handling and launch-time WeezTerm close-confirmation
   suppression so closing a terminal window detaches from the persistent d2b shell
   without prompting to kill tabs.
+- Added realm-aware VM discovery metadata: `d2b-wlterm` now prefers
+  `d2b list --json`, preserves d2b-provided canonical realm targets, and falls
+  back to `<vm>.local.d2b` for local VM labels while shell operations continue
+  using the current public socket VM id.
 
 ### Changed
 

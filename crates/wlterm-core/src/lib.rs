@@ -265,6 +265,8 @@ impl ShellSession {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VmSummary {
     pub id: VmId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_target: Option<String>,
     pub power_state: VmPowerState,
     #[serde(default)]
     pub sessions: Vec<ShellSession>,
@@ -274,6 +276,7 @@ impl VmSummary {
     pub fn new(id: VmId, power_state: VmPowerState) -> Self {
         Self {
             id,
+            canonical_target: None,
             power_state,
             sessions: Vec::new(),
         }
