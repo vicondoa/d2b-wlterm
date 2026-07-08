@@ -131,7 +131,7 @@ fn live_model(config: &Config) -> Model {
     });
     let mut vms = Vec::new();
     for candidate in list_running_vms() {
-        let vm = match VmId::new(candidate) {
+        let vm = match VmId::new(candidate.name.clone()) {
             Ok(vm) => vm,
             Err(_) => continue,
         };
@@ -140,6 +140,7 @@ fn live_model(config: &Config) -> Model {
             continue;
         };
         let mut summary = VmSummary::new(vm, VmPowerState::Online);
+        summary.canonical_target = candidate.canonical_target;
         summary.sessions = sessions;
         vms.push(summary);
     }
@@ -147,7 +148,110 @@ fn live_model(config: &Config) -> Model {
     model
 }
 
-fn list_running_vms() -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VmDiscovery {
+    name: String,
+    canonical_target: Option<String>,
+}
+
+fn list_running_vms() -> Vec<VmDiscovery> {
+    list_running_vms_json().unwrap_or_else(list_running_vms_text)
+}
+
+fn list_running_vms_json() -> Option<Vec<VmDiscovery>> {
+    let output = Command::new("d2b")
+        .args(["list", "--json"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let entries = value.as_array().cloned().or_else(|| {
+        value
+            .get("vms")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+    })?;
+    Some(
+        entries
+            .iter()
+            .filter_map(vm_discovery_from_json)
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn vm_discovery_from_json(value: &serde_json::Value) -> Option<VmDiscovery> {
+    let name = string_field(value, &["name", "vm"])?;
+    let state = string_field(value, &["status", "state"])
+        .or_else(|| nested_string_field(value, "lifecycle", &["state"]))
+        .or_else(|| nested_string_field(value, "runtime", &["state", "detail", "kind"]))
+        .unwrap_or_default();
+    let running = state.starts_with("running") || state == "online";
+    if !running || name.starts_with("sys-") {
+        return None;
+    }
+    Some(VmDiscovery {
+        canonical_target: canonical_target_from_json(value)
+            .or_else(|| canonical_local_target(&name)),
+        name,
+    })
+}
+
+fn string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+}
+
+fn nested_string_field(value: &serde_json::Value, parent: &str, keys: &[&str]) -> Option<String> {
+    value
+        .get(parent)
+        .and_then(|child| string_field(child, keys))
+}
+
+fn canonical_target_from_json(value: &serde_json::Value) -> Option<String> {
+    string_field(
+        value,
+        &[
+            "canonicalTarget",
+            "canonical_target",
+            "realmTarget",
+            "realm_target",
+            "target",
+        ],
+    )
+    .or_else(|| {
+        value.get("identity").and_then(|identity| {
+            string_field(
+                identity,
+                &[
+                    "canonicalTarget",
+                    "canonical_target",
+                    "realmTarget",
+                    "realm_target",
+                ],
+            )
+        })
+    })
+}
+
+fn canonical_local_target(vm: &str) -> Option<String> {
+    if is_canonical_vm_label(vm) {
+        Some(format!("{vm}.local.d2b"))
+    } else {
+        None
+    }
+}
+
+fn is_canonical_vm_label(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn list_running_vms_text() -> Vec<VmDiscovery> {
     let output = Command::new("d2b")
         .args(["vm", "list"])
         .stdin(Stdio::null())
@@ -166,7 +270,10 @@ fn list_running_vms() -> Vec<String> {
             let vm = parts.next()?;
             let state = parts.next().unwrap_or("unknown");
             if state == "running" && !vm.starts_with("sys-") {
-                Some(vm.to_string())
+                Some(VmDiscovery {
+                    name: vm.to_string(),
+                    canonical_target: canonical_local_target(vm),
+                })
             } else {
                 None
             }

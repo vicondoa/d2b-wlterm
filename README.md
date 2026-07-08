@@ -20,7 +20,10 @@ Implemented:
 - safe UI rendering for shell labels, manual create-name prompts,
   already-attached fallbacks, and async errors with bounded digest/correlation
   details;
-- a local `d2b-toolkit`/`d2b-client` boundary for public daemon shell actions.
+- a local `d2b-toolkit`/`d2b-client` boundary for public daemon shell actions;
+- realm-aware VM discovery metadata from `d2b list --json`, preserving
+  d2b-provided canonical targets and falling back to `<vm>.local.d2b` for local
+  VMs while the current shell public-socket verbs still address the local VM id.
 
 The d2b integration crate uses only the public daemon socket. Stop dispatches a
 shell kill only after confirmation, and closing an attached terminal view sends a
