@@ -307,6 +307,27 @@ impl VmSummary {
     }
 }
 
+/// Extract the realm segment from a canonical workload target of the form
+/// `<workload>.<realm>[...].d2b`.
+///
+/// Returns `None` when the target does not end with `.d2b` or has fewer than
+/// two dot-separated segments before the suffix.
+///
+/// ```
+/// use wlterm_core::realm_from_canonical_target;
+/// assert_eq!(realm_from_canonical_target("dev-general.dev.d2b"), Some("dev"));
+/// assert_eq!(realm_from_canonical_target("work-aad.local.d2b"), Some("local"));
+/// assert_eq!(realm_from_canonical_target("dev-general.dev.local.d2b"), Some("dev"));
+/// assert_eq!(realm_from_canonical_target("no-realm.d2b"), None);
+/// assert_eq!(realm_from_canonical_target("not-a-target"), None);
+/// ```
+pub fn realm_from_canonical_target(target: &str) -> Option<&str> {
+    let without_suffix = target.strip_suffix(".d2b")?;
+    let mut parts = without_suffix.splitn(3, '.');
+    parts.next()?; // workload segment
+    parts.next() // realm segment
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VmVisualState {
     pub power_state: VmPowerState,
@@ -930,5 +951,38 @@ mod tests {
         assert_eq!(action.metrics_label_value(), "attach-shell");
         assert!(!action.metrics_label_value().contains("customer"));
         assert_eq!(ShellVisualState::Attached.metrics_label_value(), "attached");
+    }
+
+    #[test]
+    fn realm_from_canonical_target_extracts_realm_segment() {
+        assert_eq!(
+            realm_from_canonical_target("dev-general.dev.d2b"),
+            Some("dev")
+        );
+        assert_eq!(
+            realm_from_canonical_target("work-aad.local.d2b"),
+            Some("local")
+        );
+        // multi-level targets: realm is the segment immediately after the workload
+        assert_eq!(
+            realm_from_canonical_target("dev-general.dev.local.d2b"),
+            Some("dev")
+        );
+        assert_eq!(
+            realm_from_canonical_target("home-media.home.corp.d2b"),
+            Some("home")
+        );
+    }
+
+    #[test]
+    fn realm_from_canonical_target_rejects_non_targets() {
+        // no .d2b suffix
+        assert_eq!(realm_from_canonical_target("work-aad.local"), None);
+        // only one segment before .d2b (no realm)
+        assert_eq!(realm_from_canonical_target("no-realm.d2b"), None);
+        // empty
+        assert_eq!(realm_from_canonical_target(""), None);
+        // bare suffix only
+        assert_eq!(realm_from_canonical_target(".d2b"), None);
     }
 }
