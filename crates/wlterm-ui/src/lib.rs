@@ -489,99 +489,100 @@ const QML_SOURCE: &str = r##"
                   model: root.state.realmGroups || []
                   Rectangle {
                     width: list.width
-                    height: realmGroupContent.implicitHeight + 12
+                    height: realmSurface.implicitHeight + 4
                     radius: 13
-                    color: "#10131a"
-                    border.color: root.vmAccent((modelData.workloads || [])[0])
-                    border.width: 2
+                    color: root.vmAccent((modelData.workloads || [])[0])
                     clip: true
                     property var realmGroup: modelData
+
                     Rectangle {
-                      width: 5
+                      id: realmSurface
                       anchors.left: parent.left
-                      anchors.top: parent.top
-                      anchors.bottom: parent.bottom
-                      radius: 13
-                      color: root.vmAccent((realmGroup.workloads || [])[0])
-                    }
-
-                    Column {
-                      id: realmGroupContent
-                      anchors.left: parent.left
+                      anchors.leftMargin: 5
                       anchors.right: parent.right
+                      anchors.rightMargin: 2
                       anchors.top: parent.top
-                      anchors.topMargin: 6
-                      anchors.rightMargin: 6
-                      anchors.bottomMargin: 6
-                      anchors.leftMargin: 12
-                      spacing: 6
+                      anchors.topMargin: 2
+                      anchors.bottom: parent.bottom
+                      anchors.bottomMargin: 2
+                      radius: 10
+                      color: "#10131a"
 
-                      Text {
-                        visible: (root.state.realmGroups || []).length > 1
-                        text: realmGroup.realm || "local"
-                        color: "#6b7280"
-                        font.pixelSize: 10
-                        font.bold: true
-                        leftPadding: 2
-                        bottomPadding: 2
-                      }
+                      Column {
+                        id: realmGroupContent
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: 6
+                        spacing: 6
 
-                      Repeater {
-                        model: realmGroup.workloads || []
-                        Rectangle {
-                          id: vmCard
-                          width: realmGroupContent.width
-                          height: card.implicitHeight + 16
-                          radius: 11
-                          color: "#16181d"
-                          border.color: "#313645"
-                          border.width: 1
-                          property var vm: modelData
+                        Text {
+                          visible: (root.state.realmGroups || []).length > 1
+                          text: realmGroup.realm || "local"
+                          color: "#6b7280"
+                          font.pixelSize: 10
+                          font.bold: true
+                          leftPadding: 2
+                          bottomPadding: 2
+                        }
 
-                          Column {
-                            id: card
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.top: parent.top
-                            anchors.margins: 8
-                            spacing: 6
+                        Repeater {
+                          model: realmGroup.workloads || []
+                          Rectangle {
+                            id: vmCard
+                            width: realmGroupContent.width
+                            height: card.implicitHeight + 16
+                            radius: 11
+                            color: "#16181d"
+                            border.color: "#313645"
+                            border.width: 1
+                            property var vm: modelData
 
-                            Row {
-                              width: parent.width
-                              height: 30
-                              spacing: 8
-                                StatusIcon { icon: "circle"; accent: "#9399b2"; tooltip: (vm.label || vm.id) + " is shell-capable"; }
-                                Column {
-                                  width: parent.width - 96
-                                  anchors.verticalCenter: parent.verticalCenter
-                                  Text { text: vm.label || vm.id; color: "#ffffff"; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width }
-                                  Text { visible: !!vm.canonicalTarget; text: vm.canonicalTarget || ""; color: "#6b7280"; font.pixelSize: 10; elide: Text.ElideRight; width: parent.width }
-                                  Text { text: root.shellCountLabel(vm.activeShells || 0, "shell"); color: "#9399b2"; font.pixelSize: 11 }
+                            Column {
+                              id: card
+                              anchors.left: parent.left
+                              anchors.right: parent.right
+                              anchors.top: parent.top
+                              anchors.margins: 8
+                              spacing: 6
+
+                              Row {
+                                width: parent.width
+                                height: 30
+                                spacing: 8
+                                  StatusIcon { icon: "circle"; accent: "#9399b2"; tooltip: (vm.label || vm.id) + " is shell-capable"; }
+                                  Column {
+                                    width: parent.width - 96
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    Text { text: vm.label || vm.id; color: "#ffffff"; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width }
+                                    Text { visible: !!vm.canonicalTarget; text: vm.canonicalTarget || ""; color: "#6b7280"; font.pixelSize: 10; elide: Text.ElideRight; width: parent.width }
+                                    Text { text: root.shellCountLabel(vm.activeShells || 0, "shell"); color: "#9399b2"; font.pixelSize: 11 }
+                                  }
+                                  IconButton { text: "add"; tooltip: "Create a named shell and open it"; enabled: !root.busy; onClicked: root.action(["create", vm.id]) }
                                 }
-                                IconButton { text: "add"; tooltip: "Create a named shell and open it"; enabled: !root.busy; onClicked: root.action(["create", vm.id]) }
-                              }
 
-                              Repeater {
-                                model: vm.shells || []
-                                Rectangle {
-                                  width: card.width
-                                  height: 32
-                                  radius: 9
-                                  color: "#0d0f14"
-                                  border.color: "#313645"
-                                  border.width: 1
-                                  Row {
-                                    anchors.fill: parent
-                                    anchors.margins: 5
-                                    spacing: 6
-                                    StatusIcon { icon: modelData.attached ? "link" : "link_off"; accent: modelData.attached ? "#ffffff" : "#9399b2"; tooltip: modelData.attached ? "attached" : "detached"; }
-                                    Text { text: modelData.name; color: "#ffffff"; font.pixelSize: 12; elide: Text.ElideRight; width: parent.width - 126; anchors.verticalCenter: parent.verticalCenter }
-                                    IconButton { text: modelData.attached ? "link_off" : "terminal"; tooltip: modelData.attached ? ("Detach " + modelData.name) : ("Attach to " + modelData.name); enabled: !root.busy; onClicked: modelData.attached ? root.action(["detach", vm.id, modelData.name]) : root.action(["open", vm.id, modelData.name]) }
-                                    IconButton { text: root.confirmKey === ("stop:" + vm.id + ":" + modelData.name) ? "priority_high" : "stop"; tooltip: "Stop " + modelData.name; accent: "#9399b2"; enabled: !root.busy; onClicked: root.confirmStop(vm.id, modelData.name) }
+                                Repeater {
+                                  model: vm.shells || []
+                                  Rectangle {
+                                    width: card.width
+                                    height: 32
+                                    radius: 9
+                                    color: "#0d0f14"
+                                    border.color: "#313645"
+                                    border.width: 1
+                                    Row {
+                                      anchors.fill: parent
+                                      anchors.margins: 5
+                                      spacing: 6
+                                      StatusIcon { icon: modelData.attached ? "link" : "link_off"; accent: modelData.attached ? "#ffffff" : "#9399b2"; tooltip: modelData.attached ? "attached" : "detached"; }
+                                      Text { text: modelData.name; color: "#ffffff"; font.pixelSize: 12; elide: Text.ElideRight; width: parent.width - 126; anchors.verticalCenter: parent.verticalCenter }
+                                      IconButton { text: modelData.attached ? "link_off" : "terminal"; tooltip: modelData.attached ? ("Detach " + modelData.name) : ("Attach to " + modelData.name); enabled: !root.busy; onClicked: modelData.attached ? root.action(["detach", vm.id, modelData.name]) : root.action(["open", vm.id, modelData.name]) }
+                                      IconButton { text: root.confirmKey === ("stop:" + vm.id + ":" + modelData.name) ? "priority_high" : "stop"; tooltip: "Stop " + modelData.name; accent: "#9399b2"; enabled: !root.busy; onClicked: root.confirmStop(vm.id, modelData.name) }
+                                    }
                                   }
                                 }
-                              }
 
+                            }
                           }
                         }
                       }
@@ -1137,18 +1138,18 @@ mod tests {
 
     #[test]
     fn qml_realm_groups_use_outer_border_and_neutral_workload_cards() {
-        let border_color = QML_SOURCE
-            .find("border.color: root.vmAccent((modelData.workloads || [])[0])")
-            .expect("realm group frame uses realm accent");
-        let border_width = QML_SOURCE[border_color..]
-            .find("border.width: 2")
-            .expect("realm group frame uses strong outer border");
-        assert!(border_width < 120);
-        let rail = QML_SOURCE[border_color..]
-            .find("width: 5")
-            .expect("realm group frame includes color rail");
-        assert!(rail < 300);
-        let workload_card = QML_SOURCE[border_color..]
+        let outer_color = QML_SOURCE
+            .find("color: root.vmAccent((modelData.workloads || [])[0])")
+            .expect("realm group outer shell uses realm accent");
+        let inset = QML_SOURCE[outer_color..]
+            .find("anchors.leftMargin: 5")
+            .expect("realm group includes a clean left rail inset");
+        assert!(inset < 300);
+        let surface = QML_SOURCE[outer_color..]
+            .find("color: \"#10131a\"")
+            .expect("realm group has neutral inset surface");
+        assert!(surface < 800);
+        let workload_card = QML_SOURCE[outer_color..]
             .find("border.color: \"#313645\"")
             .expect("workload card keeps neutral border");
         assert!(workload_card < 2200);
