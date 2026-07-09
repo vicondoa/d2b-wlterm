@@ -64,3 +64,5 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - The control-center popup now expands to content up to a larger screen-bound
   max height and uses d2b-wlcontrol-matched icon sizing, hover behavior, and
   borderless white/gray action icons.
+- Terminal VM cards now use a stronger realm-colored outer border so realm
+  grouping is visually consistent with the other d2b desktop companions.
