@@ -489,100 +489,93 @@ const QML_SOURCE: &str = r##"
                   model: root.state.realmGroups || []
                   Rectangle {
                     width: list.width
-                    height: realmSurface.implicitHeight + 4
+                    height: realmGroupContent.implicitHeight + 18
                     radius: 13
                     color: root.vmAccent((modelData.workloads || [])[0])
                     clip: true
                     property var realmGroup: modelData
 
                     Rectangle {
-                      id: realmSurface
-                      anchors.left: parent.left
-                      anchors.leftMargin: 5
-                      anchors.right: parent.right
-                      anchors.rightMargin: 2
-                      anchors.top: parent.top
-                      anchors.topMargin: 2
-                      anchors.bottom: parent.bottom
-                      anchors.bottomMargin: 2
+                      x: 5
+                      y: 2
+                      width: parent.width - 7
+                      height: parent.height - 4
                       radius: 10
                       color: "#10131a"
+                    }
 
-                      Column {
-                        id: realmGroupContent
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        anchors.top: parent.top
-                        anchors.margins: 6
-                        spacing: 6
+                    Column {
+                      id: realmGroupContent
+                      x: 13
+                      y: 8
+                      width: parent.width - 21
+                      spacing: 6
 
-                        Text {
-                          visible: (root.state.realmGroups || []).length > 1
-                          text: realmGroup.realm || "local"
-                          color: "#6b7280"
-                          font.pixelSize: 10
-                          font.bold: true
-                          leftPadding: 2
-                          bottomPadding: 2
-                        }
+                      Text {
+                        visible: (root.state.realmGroups || []).length > 1
+                        text: realmGroup.realm || "local"
+                        color: "#6b7280"
+                        font.pixelSize: 10
+                        font.bold: true
+                        leftPadding: 2
+                        bottomPadding: 2
+                      }
 
-                        Repeater {
-                          model: realmGroup.workloads || []
-                          Rectangle {
-                            id: vmCard
-                            width: realmGroupContent.width
-                            height: card.implicitHeight + 16
-                            radius: 11
-                            color: "#16181d"
-                            border.color: "#313645"
-                            border.width: 1
-                            property var vm: modelData
+                      Repeater {
+                        model: realmGroup.workloads || []
+                        Rectangle {
+                          id: vmCard
+                          width: realmGroupContent.width
+                          height: card.implicitHeight + 16
+                          radius: 11
+                          color: "#16181d"
+                          border.color: "#313645"
+                          border.width: 1
+                          property var vm: modelData
 
-                            Column {
-                              id: card
-                              anchors.left: parent.left
-                              anchors.right: parent.right
-                              anchors.top: parent.top
-                              anchors.margins: 8
-                              spacing: 6
+                          Column {
+                            id: card
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.margins: 8
+                            spacing: 6
 
-                              Row {
-                                width: parent.width
-                                height: 30
-                                spacing: 8
-                                  StatusIcon { icon: "circle"; accent: "#9399b2"; tooltip: (vm.label || vm.id) + " is shell-capable"; }
-                                  Column {
-                                    width: parent.width - 96
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    Text { text: vm.label || vm.id; color: "#ffffff"; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width }
-                                    Text { visible: !!vm.canonicalTarget; text: vm.canonicalTarget || ""; color: "#6b7280"; font.pixelSize: 10; elide: Text.ElideRight; width: parent.width }
-                                    Text { text: root.shellCountLabel(vm.activeShells || 0, "shell"); color: "#9399b2"; font.pixelSize: 11 }
-                                  }
-                                  IconButton { text: "add"; tooltip: "Create a named shell and open it"; enabled: !root.busy; onClicked: root.action(["create", vm.id]) }
+                            Row {
+                              width: parent.width
+                              height: 30
+                              spacing: 8
+                                StatusIcon { icon: "circle"; accent: "#9399b2"; tooltip: (vm.label || vm.id) + " is shell-capable"; }
+                                Column {
+                                  width: parent.width - 96
+                                  anchors.verticalCenter: parent.verticalCenter
+                                  Text { text: vm.label || vm.id; color: "#ffffff"; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width }
+                                  Text { visible: !!vm.canonicalTarget; text: vm.canonicalTarget || ""; color: "#6b7280"; font.pixelSize: 10; elide: Text.ElideRight; width: parent.width }
+                                  Text { text: root.shellCountLabel(vm.activeShells || 0, "shell"); color: "#9399b2"; font.pixelSize: 11 }
                                 }
+                                IconButton { text: "add"; tooltip: "Create a named shell and open it"; enabled: !root.busy; onClicked: root.action(["create", vm.id]) }
+                              }
 
-                                Repeater {
-                                  model: vm.shells || []
-                                  Rectangle {
-                                    width: card.width
-                                    height: 32
-                                    radius: 9
-                                    color: "#0d0f14"
-                                    border.color: "#313645"
-                                    border.width: 1
-                                    Row {
-                                      anchors.fill: parent
-                                      anchors.margins: 5
-                                      spacing: 6
-                                      StatusIcon { icon: modelData.attached ? "link" : "link_off"; accent: modelData.attached ? "#ffffff" : "#9399b2"; tooltip: modelData.attached ? "attached" : "detached"; }
-                                      Text { text: modelData.name; color: "#ffffff"; font.pixelSize: 12; elide: Text.ElideRight; width: parent.width - 126; anchors.verticalCenter: parent.verticalCenter }
-                                      IconButton { text: modelData.attached ? "link_off" : "terminal"; tooltip: modelData.attached ? ("Detach " + modelData.name) : ("Attach to " + modelData.name); enabled: !root.busy; onClicked: modelData.attached ? root.action(["detach", vm.id, modelData.name]) : root.action(["open", vm.id, modelData.name]) }
-                                      IconButton { text: root.confirmKey === ("stop:" + vm.id + ":" + modelData.name) ? "priority_high" : "stop"; tooltip: "Stop " + modelData.name; accent: "#9399b2"; enabled: !root.busy; onClicked: root.confirmStop(vm.id, modelData.name) }
-                                    }
+                              Repeater {
+                                model: vm.shells || []
+                                Rectangle {
+                                  width: card.width
+                                  height: 32
+                                  radius: 9
+                                  color: "#0d0f14"
+                                  border.color: "#313645"
+                                  border.width: 1
+                                  Row {
+                                    anchors.fill: parent
+                                    anchors.margins: 5
+                                    spacing: 6
+                                    StatusIcon { icon: modelData.attached ? "link" : "link_off"; accent: modelData.attached ? "#ffffff" : "#9399b2"; tooltip: modelData.attached ? "attached" : "detached"; }
+                                    Text { text: modelData.name; color: "#ffffff"; font.pixelSize: 12; elide: Text.ElideRight; width: parent.width - 126; anchors.verticalCenter: parent.verticalCenter }
+                                    IconButton { text: modelData.attached ? "link_off" : "terminal"; tooltip: modelData.attached ? ("Detach " + modelData.name) : ("Attach to " + modelData.name); enabled: !root.busy; onClicked: modelData.attached ? root.action(["detach", vm.id, modelData.name]) : root.action(["open", vm.id, modelData.name]) }
+                                    IconButton { text: root.confirmKey === ("stop:" + vm.id + ":" + modelData.name) ? "priority_high" : "stop"; tooltip: "Stop " + modelData.name; accent: "#9399b2"; enabled: !root.busy; onClicked: root.confirmStop(vm.id, modelData.name) }
                                   }
                                 }
-
-                            }
+                              }
                           }
                         }
                       }
@@ -1142,7 +1135,7 @@ mod tests {
             .find("color: root.vmAccent((modelData.workloads || [])[0])")
             .expect("realm group outer shell uses realm accent");
         let inset = QML_SOURCE[outer_color..]
-            .find("anchors.leftMargin: 5")
+            .find("x: 5")
             .expect("realm group includes a clean left rail inset");
         assert!(inset < 300);
         let surface = QML_SOURCE[outer_color..]
