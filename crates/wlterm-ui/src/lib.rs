@@ -496,13 +496,24 @@ const QML_SOURCE: &str = r##"
                     border.width: 2
                     clip: true
                     property var realmGroup: modelData
+                    Rectangle {
+                      width: 5
+                      anchors.left: parent.left
+                      anchors.top: parent.top
+                      anchors.bottom: parent.bottom
+                      radius: 13
+                      color: root.vmAccent((realmGroup.workloads || [])[0])
+                    }
 
                     Column {
                       id: realmGroupContent
                       anchors.left: parent.left
                       anchors.right: parent.right
                       anchors.top: parent.top
-                      anchors.margins: 6
+                      anchors.topMargin: 6
+                      anchors.rightMargin: 6
+                      anchors.bottomMargin: 6
+                      anchors.leftMargin: 12
                       spacing: 6
 
                       Text {
@@ -1133,10 +1144,14 @@ mod tests {
             .find("border.width: 2")
             .expect("realm group frame uses strong outer border");
         assert!(border_width < 120);
+        let rail = QML_SOURCE[border_color..]
+            .find("width: 5")
+            .expect("realm group frame includes color rail");
+        assert!(rail < 300);
         let workload_card = QML_SOURCE[border_color..]
             .find("border.color: \"#313645\"")
             .expect("workload card keeps neutral border");
-        assert!(workload_card < 1600);
+        assert!(workload_card < 2200);
     }
 
     #[test]
