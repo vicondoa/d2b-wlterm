@@ -9,6 +9,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Realm/workload grouping: `state`/`status-json` output now includes a
+  `realmGroups` array that groups shell-capable workloads by the realm segment
+  of their canonical target (`<workload>.<realm>.d2b`). Launchers and status
+  displays can iterate `realmGroups` for a structured per-realm view instead of
+  the flat `vms` list.
+- `realm_from_canonical_target` in `wlterm-core`: pure function that extracts
+  the realm label from a canonical workload target, used to build the grouped
+  state and available to sibling crates.
+- Workload canonical target is now displayed as a subtitle inside each VM card
+  in the Quickshell control center panel.
+- Multi-realm panel header: when more than one realm group is present the panel
+  shows realm labels as section headers above each group's workload cards.
+- Realm+VM count summary in the control-center panel header (e.g. "2 realms,
+  3 VM(s)") when multiple realms are discovered.
 - Exposed each VM card's `canonicalTarget` in the `state`/`status-json` output
   so launchers can display realm-aware targets discovered from d2b.
 - Documented flake input alignment for d2b, d2b-toolkit, d2b-wlterm, and

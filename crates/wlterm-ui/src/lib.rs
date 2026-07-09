@@ -12,8 +12,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use wlterm_core::friendly_name::FriendlyName;
 use wlterm_core::{
-    AsyncErrorDisplay, AsyncErrorEvent as CoreAsyncErrorEvent, Model, OpenBehavior,
-    SafeCorrelation, SessionId, ShellVisualState, VmPowerState,
+    realm_from_canonical_target, AsyncErrorDisplay, AsyncErrorEvent as CoreAsyncErrorEvent, Model,
+    OpenBehavior, SafeCorrelation, SessionId, ShellVisualState, VmPowerState,
 };
 
 pub const DISPLAY_LABEL_MAX_CHARS: usize = 40;
@@ -258,7 +258,7 @@ const QML_SOURCE: &str = r##"
     ShellRoot {
       id: root
       property string backend: Quickshell.env("D2B_WLTERM_BIN") || "d2b-wlterm"
-      property var state: ({ vms: [], activeShells: 0, hasError: false, errors: [] })
+      property var state: ({ vms: [], realmGroups: [], activeShells: 0, hasError: false, errors: [] })
       property bool busy: false
       property string message: ""
       property string hoverHint: ""
@@ -296,7 +296,8 @@ const QML_SOURCE: &str = r##"
         if (message.length > 0) return message
         if (hoverHint.length > 0) return hoverHint
         if (busy) return "working..."
-        if ((state.vms || []).length === 0) return "no shell-capable VMs"
+        const groups = state.realmGroups || []
+        if (groups.length === 0 && (state.vms || []).length === 0) return "no shell-capable VMs"
         return root.shellCountLabel(state.activeShells || 0, "active shell")
       }
       function shellCountLabel(count, singular) {
@@ -448,7 +449,16 @@ const QML_SOURCE: &str = r##"
               width: parent.width
               height: 24
               spacing: 10
-              Text { text: (root.state.vms || []).length + " VM(s)"; color: "#ffffff"; font.pixelSize: 13; font.bold: true }
+              Text {
+                text: {
+                  const rg = root.state.realmGroups || []
+                  const vms = root.state.vms || []
+                  return rg.length > 1
+                    ? rg.length + " realms, " + vms.length + " VM(s)"
+                    : vms.length + " VM(s)"
+                }
+                color: "#ffffff"; font.pixelSize: 13; font.bold: true
+              }
               Text { text: root.statusText(); color: root.failed ? "#f38ba8" : "#9399b2"; font.pixelSize: 12; elide: Text.ElideRight; width: parent.width - 80 }
             }
 
@@ -476,59 +486,79 @@ const QML_SOURCE: &str = r##"
                 spacing: 8
 
                 Repeater {
-                  model: root.state.vms || []
-                  Rectangle {
-                    id: vmCard
+                  model: root.state.realmGroups || []
+                  Column {
                     width: list.width
-                    height: card.implicitHeight + 16
-                    radius: 13
-                    color: "#16181d"
-                    border.color: root.vmAccent(vm)
-                    border.width: 1
-                    property var vm: modelData
+                    spacing: 4
+                    property var realmGroup: modelData
 
-                    Column {
-                      id: card
-                      anchors.left: parent.left
-                      anchors.right: parent.right
-                      anchors.top: parent.top
-                      anchors.margins: 8
-                      spacing: 6
+                    Text {
+                      visible: (root.state.realmGroups || []).length > 1
+                      text: realmGroup.realm || "local"
+                      color: "#6b7280"
+                      font.pixelSize: 10
+                      font.bold: true
+                      leftPadding: 2
+                      bottomPadding: 2
+                    }
 
-                      Row {
-                        width: parent.width
-                        height: 30
-                        spacing: 8
-                          StatusIcon { icon: "circle"; accent: "#9399b2"; tooltip: (vm.label || vm.id) + " is shell-capable"; }
-                          Column {
-                            width: parent.width - 96
-                            anchors.verticalCenter: parent.verticalCenter
-                            Text { text: vm.label || vm.id; color: "#ffffff"; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width }
-                            Text { text: root.shellCountLabel(vm.activeShells || 0, "shell"); color: "#9399b2"; font.pixelSize: 11 }
-                          }
-                          IconButton { text: "add"; tooltip: "Create a named shell and open it"; enabled: !root.busy; onClicked: root.action(["create", vm.id]) }
-                        }
+                    Repeater {
+                      model: realmGroup.workloads || []
+                      Rectangle {
+                        id: vmCard
+                        width: list.width
+                        height: card.implicitHeight + 16
+                        radius: 13
+                        color: "#16181d"
+                        border.color: root.vmAccent(vm)
+                        border.width: 1
+                        property var vm: modelData
 
-                        Repeater {
-                          model: vm.shells || []
-                          Rectangle {
-                            width: card.width
-                            height: 32
-                            radius: 9
-                            color: "#0d0f14"
-                            border.color: modelData.attached ? root.vmAccent(vm) : "#313645"
-                            border.width: 1
-                            Row {
-                              anchors.fill: parent
-                              anchors.margins: 5
-                              spacing: 6
-                              StatusIcon { icon: modelData.attached ? "link" : "link_off"; accent: modelData.attached ? "#ffffff" : "#9399b2"; tooltip: modelData.attached ? "attached" : "detached"; }
-                              Text { text: modelData.name; color: "#ffffff"; font.pixelSize: 12; elide: Text.ElideRight; width: parent.width - 126; anchors.verticalCenter: parent.verticalCenter }
-                              IconButton { text: modelData.attached ? "link_off" : "terminal"; tooltip: modelData.attached ? ("Detach " + modelData.name) : ("Attach to " + modelData.name); enabled: !root.busy; onClicked: modelData.attached ? root.action(["detach", vm.id, modelData.name]) : root.action(["open", vm.id, modelData.name]) }
-                              IconButton { text: root.confirmKey === ("stop:" + vm.id + ":" + modelData.name) ? "priority_high" : "stop"; tooltip: "Stop " + modelData.name; accent: "#9399b2"; enabled: !root.busy; onClicked: root.confirmStop(vm.id, modelData.name) }
+                        Column {
+                          id: card
+                          anchors.left: parent.left
+                          anchors.right: parent.right
+                          anchors.top: parent.top
+                          anchors.margins: 8
+                          spacing: 6
+
+                          Row {
+                            width: parent.width
+                            height: 30
+                            spacing: 8
+                              StatusIcon { icon: "circle"; accent: "#9399b2"; tooltip: (vm.label || vm.id) + " is shell-capable"; }
+                              Column {
+                                width: parent.width - 96
+                                anchors.verticalCenter: parent.verticalCenter
+                                Text { text: vm.label || vm.id; color: "#ffffff"; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width }
+                                Text { visible: !!vm.canonicalTarget; text: vm.canonicalTarget || ""; color: "#6b7280"; font.pixelSize: 10; elide: Text.ElideRight; width: parent.width }
+                                Text { text: root.shellCountLabel(vm.activeShells || 0, "shell"); color: "#9399b2"; font.pixelSize: 11 }
+                              }
+                              IconButton { text: "add"; tooltip: "Create a named shell and open it"; enabled: !root.busy; onClicked: root.action(["create", vm.id]) }
                             }
-                          }
+
+                            Repeater {
+                              model: vm.shells || []
+                              Rectangle {
+                                width: card.width
+                                height: 32
+                                radius: 9
+                                color: "#0d0f14"
+                                border.color: modelData.attached ? root.vmAccent(vm) : "#313645"
+                                border.width: 1
+                                Row {
+                                  anchors.fill: parent
+                                  anchors.margins: 5
+                                  spacing: 6
+                                  StatusIcon { icon: modelData.attached ? "link" : "link_off"; accent: modelData.attached ? "#ffffff" : "#9399b2"; tooltip: modelData.attached ? "attached" : "detached"; }
+                                  Text { text: modelData.name; color: "#ffffff"; font.pixelSize: 12; elide: Text.ElideRight; width: parent.width - 126; anchors.verticalCenter: parent.verticalCenter }
+                                  IconButton { text: modelData.attached ? "link_off" : "terminal"; tooltip: modelData.attached ? ("Detach " + modelData.name) : ("Attach to " + modelData.name); enabled: !root.busy; onClicked: modelData.attached ? root.action(["detach", vm.id, modelData.name]) : root.action(["open", vm.id, modelData.name]) }
+                                  IconButton { text: root.confirmKey === ("stop:" + vm.id + ":" + modelData.name) ? "priority_high" : "stop"; tooltip: "Stop " + modelData.name; accent: "#9399b2"; enabled: !root.busy; onClicked: root.confirmStop(vm.id, modelData.name) }
+                                }
+                              }
+                            }
                         }
+                      }
                     }
                   }
                 }
@@ -659,10 +689,28 @@ impl AsyncErrorEvent {
     }
 }
 
+/// A group of shell-capable workloads that share a realm.
+///
+/// Launchers and status displays consume this to present VMs organized by realm
+/// rather than as a flat list. Shell operations still address the VM by its local
+/// `id` over the public socket — the realm grouping is presentation metadata only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RealmGroup {
+    /// Realm label extracted from the canonical target, e.g. `"dev"` or `"local"`.
+    pub realm: String,
+    /// Workload cards belonging to this realm, in discovery order.
+    pub workloads: Vec<VmControlCard>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlCenterState {
+    /// Flat list of all shell-capable VMs (kept for backward compatibility).
     pub vms: Vec<VmControlCard>,
+    /// VMs grouped by realm, derived from each VM's canonical target.
+    /// Consumers that can use this should prefer it over the flat `vms` list.
+    pub realm_groups: Vec<RealmGroup>,
     pub active_shells: usize,
     pub has_error: bool,
     pub errors: Vec<RenderedAsyncError>,
@@ -677,9 +725,11 @@ impl ControlCenterState {
             .collect();
         let vms: Vec<_> = model.vms().map(VmControlCard::from_summary).collect();
         let active_shells = vms.iter().map(|vm| vm.active_shells).sum();
+        let realm_groups = build_realm_groups(&vms);
 
         Self {
             vms,
+            realm_groups,
             active_shells,
             has_error: !errors.is_empty(),
             errors,
@@ -689,6 +739,7 @@ impl ControlCenterState {
     pub fn empty() -> Self {
         Self {
             vms: Vec::new(),
+            realm_groups: Vec::new(),
             active_shells: 0,
             has_error: false,
             errors: Vec::new(),
@@ -698,6 +749,32 @@ impl ControlCenterState {
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("control center state serializes")
     }
+}
+
+/// Group VM control cards by the realm extracted from each card's canonical target.
+///
+/// VMs without a parseable realm (no canonical target, or target without a realm
+/// segment) are placed in a synthetic `"local"` group. Realm insertion order
+/// follows the order in which VMs appear in `vms`.
+fn build_realm_groups(vms: &[VmControlCard]) -> Vec<RealmGroup> {
+    let mut groups: Vec<RealmGroup> = Vec::new();
+    for vm in vms {
+        let realm = vm
+            .canonical_target
+            .as_deref()
+            .and_then(realm_from_canonical_target)
+            .unwrap_or("local")
+            .to_owned();
+        if let Some(group) = groups.iter_mut().find(|g| g.realm == realm) {
+            group.workloads.push(vm.clone());
+        } else {
+            groups.push(RealmGroup {
+                realm,
+                workloads: vec![vm.clone()],
+            });
+        }
+    }
+    groups
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -1108,6 +1185,93 @@ mod tests {
         assert!(state.has_error);
         assert_eq!(state.errors[0].title, "d2b-wlterm action failed");
         assert!(!state.to_json().contains("quiet-otter and opaque"));
+    }
+
+    #[test]
+    fn realm_groups_are_built_from_canonical_targets() {
+        let mut dev_vm = VmSummary::new(vm("dev-general"), VmPowerState::Online);
+        dev_vm.canonical_target = Some("dev-general.dev.d2b".to_string());
+
+        let mut work_vm = VmSummary::new(vm("work-aad"), VmPowerState::Online);
+        work_vm.canonical_target = Some("work-aad.corp.d2b".to_string());
+
+        let mut dev_vm2 = VmSummary::new(vm("dev-media"), VmPowerState::Online);
+        dev_vm2.canonical_target = Some("dev-media.dev.d2b".to_string());
+
+        let mut model = Model::new(Config::default());
+        model.apply(ModelEvent::VmSnapshot {
+            vms: vec![dev_vm, work_vm, dev_vm2],
+        });
+
+        let state = ControlCenterState::from_model(&model);
+
+        // three VMs in flat list
+        assert_eq!(state.vms.len(), 3);
+
+        // two realm groups: dev (first) and corp (second)
+        assert_eq!(state.realm_groups.len(), 2);
+        assert_eq!(state.realm_groups[0].realm, "dev");
+        assert_eq!(state.realm_groups[0].workloads.len(), 2);
+        assert_eq!(state.realm_groups[0].workloads[0].id, "dev-general");
+        assert_eq!(state.realm_groups[0].workloads[1].id, "dev-media");
+        assert_eq!(state.realm_groups[1].realm, "corp");
+        assert_eq!(state.realm_groups[1].workloads.len(), 1);
+        assert_eq!(state.realm_groups[1].workloads[0].id, "work-aad");
+
+        // realm groups are present in the serialized JSON
+        let json = state.to_json();
+        assert!(json.contains("\"realmGroups\""));
+        assert!(json.contains("\"dev\""));
+        assert!(json.contains("\"corp\""));
+    }
+
+    #[test]
+    fn vms_without_canonical_target_fall_into_local_realm() {
+        let mut no_target = VmSummary::new(vm("home-general"), VmPowerState::Online);
+        no_target.canonical_target = None;
+
+        let mut local_vm = VmSummary::new(vm("home-media"), VmPowerState::Online);
+        local_vm.canonical_target = Some("home-media.local.d2b".to_string());
+
+        let mut model = Model::new(Config::default());
+        model.apply(ModelEvent::VmSnapshot {
+            vms: vec![no_target, local_vm],
+        });
+
+        let state = ControlCenterState::from_model(&model);
+
+        // both VMs land in the "local" realm group
+        assert_eq!(state.realm_groups.len(), 1);
+        assert_eq!(state.realm_groups[0].realm, "local");
+        assert_eq!(state.realm_groups[0].workloads.len(), 2);
+    }
+
+    #[test]
+    fn realm_groups_preserve_discovery_order_across_realms() {
+        // VMs are stored in a BTreeMap keyed by VmId, so they are returned in
+        // lexicographic order: corp-b < dev-a < home-c → realm order: corp, dev, home.
+        let mut dev = VmSummary::new(vm("dev-a"), VmPowerState::Online);
+        dev.canonical_target = Some("dev-a.dev.d2b".to_string());
+
+        let mut corp = VmSummary::new(vm("corp-b"), VmPowerState::Online);
+        corp.canonical_target = Some("corp-b.corp.d2b".to_string());
+
+        let mut home = VmSummary::new(vm("home-c"), VmPowerState::Online);
+        home.canonical_target = Some("home-c.home.d2b".to_string());
+
+        let mut model = Model::new(Config::default());
+        model.apply(ModelEvent::VmSnapshot {
+            vms: vec![dev, corp, home],
+        });
+
+        let state = ControlCenterState::from_model(&model);
+        // BTreeMap returns VMs in alphabetical order: corp-b, dev-a, home-c
+        let realm_names: Vec<&str> = state
+            .realm_groups
+            .iter()
+            .map(|g| g.realm.as_str())
+            .collect();
+        assert_eq!(realm_names, vec!["corp", "dev", "home"]);
     }
 
     #[test]

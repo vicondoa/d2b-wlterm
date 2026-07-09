@@ -23,7 +23,12 @@ Implemented:
 - a local `d2b-toolkit`/`d2b-client` boundary for public daemon shell actions;
 - realm-aware VM discovery metadata from `d2b list --json`, preserving
   d2b-provided canonical targets and falling back to `<vm>.local.d2b` for local
-  VMs while the current shell public-socket verbs still address the local VM id.
+  VMs while the current shell public-socket verbs still address the local VM id;
+- realm/workload grouping: `state`/`status-json` output includes a `realmGroups`
+  array that lists shell-capable workloads organized by the realm extracted from
+  each workload's canonical target (`<workload>.<realm>.d2b`). The Quickshell
+  panel shows realm section headers when multiple realms are present and displays
+  each workload's canonical target as a subtitle in its VM card.
 
 The d2b integration crate uses only the public daemon socket. Stop dispatches a
 shell kill only after confirmation, and closing an attached terminal view sends a
