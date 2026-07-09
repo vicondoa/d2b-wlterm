@@ -511,7 +511,7 @@ const QML_SOURCE: &str = r##"
                         radius: 13
                         color: "#16181d"
                         border.color: root.vmAccent(vm)
-                        border.width: 1
+                        border.width: 2
                         property var vm: modelData
 
                         Column {
@@ -1107,6 +1107,17 @@ mod tests {
         let decision = disconnect_terminal_view(&session);
         assert_eq!(decision.action, "disconnect");
         assert_ne!(decision.action, "stop");
+    }
+
+    #[test]
+    fn qml_vm_cards_use_strong_realm_outer_border() {
+        let border_color = QML_SOURCE
+            .find("border.color: root.vmAccent(vm)")
+            .expect("VM card uses realm accent");
+        let border_width = QML_SOURCE[border_color..]
+            .find("border.width: 2")
+            .expect("VM card uses strong outer border");
+        assert!(border_width < 120);
     }
 
     #[test]
