@@ -316,6 +316,13 @@ const QML_SOURCE: &str = r##"
         return typeof value === "string" && /^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(value)
       }
       function shellColor(name, fallback) { return fallback }
+      function realmAccent(realm, fallbackVm) {
+        const realms = theme.realms || ({})
+        const envs = theme.envs || ({})
+        if (realm && realms[realm] && isHexColor(realms[realm].accent)) return realms[realm].accent
+        if (realm && envs[realm] && isHexColor(envs[realm].accent)) return envs[realm].accent
+        return vmAccent(fallbackVm)
+      }
       function vmAccent(vm) {
         const id = vm && (vm.id || vm.label)
         const vms = theme.vms || ({})
@@ -501,7 +508,7 @@ const QML_SOURCE: &str = r##"
                       width: 5
                       height: parent.height
                       radius: 0
-                      color: root.vmAccent((realmGroup.workloads || [])[0])
+                      color: root.realmAccent(realmGroup.realm, (realmGroup.workloads || [])[0])
                     }
                     Rectangle {
                       x: 5
@@ -1148,7 +1155,7 @@ mod tests {
             .find("height: realmGroupContent.implicitHeight + 18")
             .expect("realm group block exists");
         let rail_color = QML_SOURCE[realm_block..]
-            .find("color: root.vmAccent((realmGroup.workloads || [])[0])")
+            .find("color: root.realmAccent(realmGroup.realm, (realmGroup.workloads || [])[0])")
             .expect("realm group left rail uses realm accent");
         let inset = QML_SOURCE[realm_block..]
             .find("x: 0")
