@@ -332,7 +332,7 @@ const QML_SOURCE: &str = r##"
         return "#9399b2"
       }
       function screenWidth() { return panel.screen ? panel.screen.width : 1280 }
-      function screenHeight() { return panel.screen ? panel.screen.height : 1080 }
+      function screenHeight() { return panel.screen && panel.screen.height > 0 ? panel.screen.height : 1080 }
       function clamp(value, min, max) { return Math.max(min, Math.min(max, value)) }
       function movePanel(dx, dy) {
         panelRightMargin = clamp(panelRightMargin - dx, 4, Math.max(4, screenWidth() - panel.width - 4))
@@ -349,8 +349,8 @@ const QML_SOURCE: &str = r##"
           confirmTimer.restart()
         }
       }
-      function maxPanelHeight() { return Math.floor(root.screenHeight() * 0.82) }
-      function panelContentHeight() { return 180 + list.implicitHeight + (message.length > 0 ? 36 : 0) }
+      function maxPanelHeight() { return Math.max(520, Math.floor(root.screenHeight() * 0.82)) }
+      function panelContentHeight() { return 220 + list.implicitHeight + (message.length > 0 ? 36 : 0) }
 
       Process {
         id: statusProc
@@ -396,7 +396,7 @@ const QML_SOURCE: &str = r##"
         aboveWindows: true
         exclusiveZone: 0
         implicitWidth: 420
-        implicitHeight: Math.min(Math.max(240, root.panelContentHeight()), root.maxPanelHeight())
+        implicitHeight: Math.min(Math.max(420, root.panelContentHeight()), root.maxPanelHeight())
         color: "transparent"
         surfaceFormat { opaque: false }
         anchors { top: true; right: true }
