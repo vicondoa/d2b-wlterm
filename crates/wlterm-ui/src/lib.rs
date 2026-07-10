@@ -350,7 +350,7 @@ const QML_SOURCE: &str = r##"
         }
       }
       function maxPanelHeight() { return Math.floor(root.screenHeight() * 0.82) }
-      function panelContentHeight() { return 96 + list.implicitHeight + (message.length > 0 ? 36 : 0) }
+      function panelContentHeight() { return 140 + list.implicitHeight + (message.length > 0 ? 36 : 0) }
 
       Process {
         id: statusProc
