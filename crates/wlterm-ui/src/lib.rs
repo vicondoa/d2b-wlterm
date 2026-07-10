@@ -316,6 +316,13 @@ const QML_SOURCE: &str = r##"
         return typeof value === "string" && /^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(value)
       }
       function shellColor(name, fallback) { return fallback }
+      function realmAccent(realm, fallbackVm) {
+        const realms = theme.realms || ({})
+        const envs = theme.envs || ({})
+        if (realm && realms[realm] && isHexColor(realms[realm].accent)) return realms[realm].accent
+        if (realm && envs[realm] && isHexColor(envs[realm].accent)) return envs[realm].accent
+        return vmAccent(fallbackVm)
+      }
       function vmAccent(vm) {
         const id = vm && (vm.id || vm.label)
         const vms = theme.vms || ({})
@@ -332,7 +339,7 @@ const QML_SOURCE: &str = r##"
         return "#9399b2"
       }
       function screenWidth() { return panel.screen ? panel.screen.width : 1280 }
-      function screenHeight() { return panel.screen ? panel.screen.height : 1080 }
+      function screenHeight() { return panel.screen && panel.screen.height > 0 ? panel.screen.height : 1080 }
       function clamp(value, min, max) { return Math.max(min, Math.min(max, value)) }
       function movePanel(dx, dy) {
         panelRightMargin = clamp(panelRightMargin - dx, 4, Math.max(4, screenWidth() - panel.width - 4))
@@ -349,8 +356,8 @@ const QML_SOURCE: &str = r##"
           confirmTimer.restart()
         }
       }
-      function maxPanelHeight() { return Math.floor(root.screenHeight() * 0.82) }
-      function panelContentHeight() { return 96 + list.implicitHeight + (message.length > 0 ? 36 : 0) }
+      function maxPanelHeight() { return Math.max(720, Math.floor(root.screenHeight() * 0.92)) }
+      function panelContentHeight() { return 360 + list.implicitHeight + (message.length > 0 ? 36 : 0) }
 
       Process {
         id: statusProc
@@ -396,7 +403,7 @@ const QML_SOURCE: &str = r##"
         aboveWindows: true
         exclusiveZone: 0
         implicitWidth: 420
-        implicitHeight: Math.min(Math.max(240, root.panelContentHeight()), root.maxPanelHeight())
+        implicitHeight: Math.min(Math.max(620, root.panelContentHeight()), root.maxPanelHeight())
         color: "transparent"
         surfaceFormat { opaque: false }
         anchors { top: true; right: true }
@@ -489,20 +496,36 @@ const QML_SOURCE: &str = r##"
                   model: root.state.realmGroups || []
                   Rectangle {
                     width: list.width
-                    height: realmGroupContent.implicitHeight + 12
+                    height: realmGroupContent.implicitHeight + 18
                     radius: 13
-                    color: "#10131a"
-                    border.color: root.vmAccent((modelData.workloads || [])[0])
-                    border.width: 2
+                    color: "transparent"
                     clip: true
                     property var realmGroup: modelData
 
+                    Rectangle {
+                      x: 0
+                      y: 0
+                      width: 5
+                      height: parent.height
+                      radius: 0
+                      color: root.realmAccent(realmGroup.realm, (realmGroup.workloads || [])[0])
+                    }
+                    Rectangle {
+                      x: 5
+                      y: 0
+                      width: parent.width - 5
+                      height: parent.height
+                      radius: 10
+                      color: "#10131a"
+                      border.color: "#2a2d35"
+                      border.width: 1
+                    }
+
                     Column {
                       id: realmGroupContent
-                      anchors.left: parent.left
-                      anchors.right: parent.right
-                      anchors.top: parent.top
-                      anchors.margins: 6
+                      x: 13
+                      y: 8
+                      width: parent.width - 21
                       spacing: 6
 
                       Text {
@@ -537,15 +560,18 @@ const QML_SOURCE: &str = r##"
 
                             Row {
                               width: parent.width
-                              height: 30
+                              height: 28
                               spacing: 8
                                 StatusIcon { icon: "circle"; accent: "#9399b2"; tooltip: (vm.label || vm.id) + " is shell-capable"; }
-                                Column {
-                                  width: parent.width - 96
+                                Text {
+                                  width: parent.width - 104
                                   anchors.verticalCenter: parent.verticalCenter
-                                  Text { text: vm.label || vm.id; color: "#ffffff"; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width }
-                                  Text { visible: !!vm.canonicalTarget; text: vm.canonicalTarget || ""; color: "#6b7280"; font.pixelSize: 10; elide: Text.ElideRight; width: parent.width }
-                                  Text { text: root.shellCountLabel(vm.activeShells || 0, "shell"); color: "#9399b2"; font.pixelSize: 11 }
+                                  text: (vm.label || vm.id) + " · " + (vm.canonicalTarget || vm.id || "") + " · " + root.shellCountLabel(vm.activeShells || 0, "shell")
+                                  color: "#ffffff"
+                                  font.pixelSize: 12
+                                  font.bold: true
+                                  elide: Text.ElideRight
+                                  wrapMode: Text.NoWrap
                                 }
                                 IconButton { text: "add"; tooltip: "Create a named shell and open it"; enabled: !root.busy; onClicked: root.action(["create", vm.id]) }
                               }
@@ -570,7 +596,6 @@ const QML_SOURCE: &str = r##"
                                   }
                                 }
                               }
-
                           }
                         }
                       }
@@ -1126,17 +1151,30 @@ mod tests {
 
     #[test]
     fn qml_realm_groups_use_outer_border_and_neutral_workload_cards() {
-        let border_color = QML_SOURCE
-            .find("border.color: root.vmAccent((modelData.workloads || [])[0])")
-            .expect("realm group frame uses realm accent");
-        let border_width = QML_SOURCE[border_color..]
-            .find("border.width: 2")
-            .expect("realm group frame uses strong outer border");
-        assert!(border_width < 120);
-        let workload_card = QML_SOURCE[border_color..]
+        let realm_block = QML_SOURCE
+            .find("height: realmGroupContent.implicitHeight + 18")
+            .expect("realm group block exists");
+        let rail_color = QML_SOURCE[realm_block..]
+            .find("color: root.realmAccent(realmGroup.realm, (realmGroup.workloads || [])[0])")
+            .expect("realm group left rail uses realm accent");
+        let inset = QML_SOURCE[realm_block..]
+            .find("x: 0")
+            .expect("realm group includes a clean left rail inset");
+        assert!(inset < 300);
+        assert!(rail_color < 800);
+        let neutral_shell = QML_SOURCE[realm_block..]
+            .find("border.color: \"#2a2d35\"")
+            .expect("realm group frame uses neutral border");
+        assert!(neutral_shell < 800);
+        let neutral_shell_abs = realm_block + neutral_shell;
+        let surface = QML_SOURCE[realm_block..]
+            .find("color: \"#10131a\"")
+            .expect("realm group has neutral inset surface");
+        assert!(surface < 800);
+        let workload_card = QML_SOURCE[neutral_shell_abs..]
             .find("border.color: \"#313645\"")
             .expect("workload card keeps neutral border");
-        assert!(workload_card < 1600);
+        assert!(workload_card < 3500);
     }
 
     #[test]

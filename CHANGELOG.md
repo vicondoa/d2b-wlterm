@@ -66,3 +66,5 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   borderless white/gray action icons.
 - Terminal realm groups now use a realm-colored outer border while workload
   cards keep neutral inner borders, matching the other d2b desktop companions.
+- Terminal realm groups now include a rounded color rail so their visual
+  identity matches Waybar, wlcontrol, and clip-picker.
