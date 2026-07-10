@@ -350,7 +350,7 @@ const QML_SOURCE: &str = r##"
         }
       }
       function maxPanelHeight() { return Math.floor(root.screenHeight() * 0.82) }
-      function panelContentHeight() { return 140 + list.implicitHeight + (message.length > 0 ? 36 : 0) }
+      function panelContentHeight() { return 180 + list.implicitHeight + (message.length > 0 ? 36 : 0) }
 
       Process {
         id: statusProc
@@ -491,17 +491,19 @@ const QML_SOURCE: &str = r##"
                     width: list.width
                     height: realmGroupContent.implicitHeight + 18
                     radius: 13
-                    color: root.vmAccent((modelData.workloads || [])[0])
+                    color: "#10131a"
+                    border.color: "#2a2d35"
+                    border.width: 1
                     clip: true
                     property var realmGroup: modelData
 
                     Rectangle {
-                      x: 5
-                      y: 2
-                      width: parent.width - 7
-                      height: parent.height - 4
-                      radius: 10
-                      color: "#10131a"
+                      x: 0
+                      y: 0
+                      width: 5
+                      height: parent.height
+                      radius: 13
+                      color: root.vmAccent((realmGroup.workloads || [])[0])
                     }
 
                     Column {
@@ -1131,18 +1133,26 @@ mod tests {
 
     #[test]
     fn qml_realm_groups_use_outer_border_and_neutral_workload_cards() {
-        let outer_color = QML_SOURCE
-            .find("color: root.vmAccent((modelData.workloads || [])[0])")
-            .expect("realm group outer shell uses realm accent");
-        let inset = QML_SOURCE[outer_color..]
-            .find("x: 5")
+        let realm_block = QML_SOURCE
+            .find("height: realmGroupContent.implicitHeight + 18")
+            .expect("realm group block exists");
+        let neutral_shell = QML_SOURCE[realm_block..]
+            .find("border.color: \"#2a2d35\"")
+            .expect("realm group frame uses neutral border");
+        let neutral_shell = realm_block + neutral_shell;
+        let rail_color = QML_SOURCE[neutral_shell..]
+            .find("color: root.vmAccent((realmGroup.workloads || [])[0])")
+            .expect("realm group left rail uses realm accent");
+        let inset = QML_SOURCE[neutral_shell..]
+            .find("x: 0")
             .expect("realm group includes a clean left rail inset");
         assert!(inset < 300);
-        let surface = QML_SOURCE[outer_color..]
+        assert!(rail_color < 400);
+        let surface = QML_SOURCE[realm_block..]
             .find("color: \"#10131a\"")
             .expect("realm group has neutral inset surface");
         assert!(surface < 800);
-        let workload_card = QML_SOURCE[outer_color..]
+        let workload_card = QML_SOURCE[neutral_shell..]
             .find("border.color: \"#313645\"")
             .expect("workload card keeps neutral border");
         assert!(workload_card < 2200);
