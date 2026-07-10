@@ -349,8 +349,8 @@ const QML_SOURCE: &str = r##"
           confirmTimer.restart()
         }
       }
-      function maxPanelHeight() { return Math.max(620, Math.floor(root.screenHeight() * 0.86)) }
-      function panelContentHeight() { return 280 + list.implicitHeight + (message.length > 0 ? 36 : 0) }
+      function maxPanelHeight() { return Math.max(720, Math.floor(root.screenHeight() * 0.92)) }
+      function panelContentHeight() { return 360 + list.implicitHeight + (message.length > 0 ? 36 : 0) }
 
       Process {
         id: statusProc
@@ -396,7 +396,7 @@ const QML_SOURCE: &str = r##"
         aboveWindows: true
         exclusiveZone: 0
         implicitWidth: 420
-        implicitHeight: Math.min(Math.max(420, root.panelContentHeight()), root.maxPanelHeight())
+        implicitHeight: Math.min(Math.max(620, root.panelContentHeight()), root.maxPanelHeight())
         color: "transparent"
         surfaceFormat { opaque: false }
         anchors { top: true; right: true }
@@ -502,7 +502,7 @@ const QML_SOURCE: &str = r##"
                       y: 0
                       width: 5
                       height: parent.height
-                      radius: 13
+                      radius: 0
                       color: root.vmAccent((realmGroup.workloads || [])[0])
                     }
 
@@ -545,21 +545,18 @@ const QML_SOURCE: &str = r##"
 
                             Row {
                               width: parent.width
-                              height: 30
+                              height: 28
                               spacing: 8
                                 StatusIcon { icon: "circle"; accent: "#9399b2"; tooltip: (vm.label || vm.id) + " is shell-capable"; }
-                                Column {
-                                  width: parent.width - 96
+                                Text {
+                                  width: parent.width - 104
                                   anchors.verticalCenter: parent.verticalCenter
-                                  Text { text: vm.label || vm.id; color: "#ffffff"; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width }
-                                  Text {
-                                    text: (vm.canonicalTarget || vm.id || "") + " · " + root.shellCountLabel(vm.activeShells || 0, "shell")
-                                    color: "#6b7280"
-                                    font.pixelSize: 10
-                                    elide: Text.ElideRight
-                                    wrapMode: Text.NoWrap
-                                    width: parent.width
-                                  }
+                                  text: (vm.label || vm.id) + " · " + (vm.canonicalTarget || vm.id || "") + " · " + root.shellCountLabel(vm.activeShells || 0, "shell")
+                                  color: "#ffffff"
+                                  font.pixelSize: 12
+                                  font.bold: true
+                                  elide: Text.ElideRight
+                                  wrapMode: Text.NoWrap
                                 }
                                 IconButton { text: "add"; tooltip: "Create a named shell and open it"; enabled: !root.busy; onClicked: root.action(["create", vm.id]) }
                               }
