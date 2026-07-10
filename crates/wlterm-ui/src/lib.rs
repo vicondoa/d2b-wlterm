@@ -349,8 +349,8 @@ const QML_SOURCE: &str = r##"
           confirmTimer.restart()
         }
       }
-      function maxPanelHeight() { return Math.max(520, Math.floor(root.screenHeight() * 0.82)) }
-      function panelContentHeight() { return 220 + list.implicitHeight + (message.length > 0 ? 36 : 0) }
+      function maxPanelHeight() { return Math.max(620, Math.floor(root.screenHeight() * 0.86)) }
+      function panelContentHeight() { return 280 + list.implicitHeight + (message.length > 0 ? 36 : 0) }
 
       Process {
         id: statusProc
@@ -552,8 +552,14 @@ const QML_SOURCE: &str = r##"
                                   width: parent.width - 96
                                   anchors.verticalCenter: parent.verticalCenter
                                   Text { text: vm.label || vm.id; color: "#ffffff"; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width }
-                                  Text { visible: !!vm.canonicalTarget; text: vm.canonicalTarget || ""; color: "#6b7280"; font.pixelSize: 10; elide: Text.ElideRight; width: parent.width }
-                                  Text { text: root.shellCountLabel(vm.activeShells || 0, "shell"); color: "#9399b2"; font.pixelSize: 11 }
+                                  Text {
+                                    text: (vm.canonicalTarget || vm.id || "") + " · " + root.shellCountLabel(vm.activeShells || 0, "shell")
+                                    color: "#6b7280"
+                                    font.pixelSize: 10
+                                    elide: Text.ElideRight
+                                    wrapMode: Text.NoWrap
+                                    width: parent.width
+                                  }
                                 }
                                 IconButton { text: "add"; tooltip: "Create a named shell and open it"; enabled: !root.busy; onClicked: root.action(["create", vm.id]) }
                               }
