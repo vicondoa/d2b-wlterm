@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     d2b-toolkit = {
-      url = "github:vicondoa/d2b-toolkit/fde6af8b842718e7150f5056d4eba73093d4ad77";
+      url = "github:vicondoa/d2b-toolkit/v0.2.0";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -96,7 +96,7 @@
           release-metadata = pkgs.runCommand "d2b-wlterm-release-metadata-${version}" { } ''
             grep -Fq 'version = "0.2.0"' ${./Cargo.toml}
             grep -Fq '## [0.2.0] - 2026-07-11' ${./CHANGELOG.md}
-            grep -Fq 'fde6af8b842718e7150f5056d4eba73093d4ad77' ${./Cargo.toml}
+            grep -Fq 'tag = "v0.2.0"' ${./Cargo.toml}
             grep -Fq 'fde6af8b842718e7150f5056d4eba73093d4ad77' ${./flake.lock}
             touch $out
           '';

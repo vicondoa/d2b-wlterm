@@ -30,7 +30,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Terminal models and actions use canonical workload targets while retaining
   legacy VM JSON fields and aliases for compatibility.
 - d2b-toolkit is pinned to version 0.2.0 at revision
-  `fde6af8b842718e7150f5056d4eba73093d4ad77`.
+  release tag `v0.2.0` (locked to
+  `fde6af8b842718e7150f5056d4eba73093d4ad77`).
 - All workspace crates and flake package outputs are version 0.2.0.
 
 ### Security

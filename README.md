@@ -41,7 +41,8 @@ nix flake check
 ## Flake inputs
 
 This release pins d2b-toolkit 0.2.0 at
-`fde6af8b842718e7150f5056d4eba73093d4ad77`. Consumers should keep one toolkit
+`v0.2.0` (resolved by the lock file to
+`fde6af8b842718e7150f5056d4eba73093d4ad77`). Consumers should keep one toolkit
 and nixpkgs revision across desktop companions:
 
 ```nix
@@ -55,7 +56,7 @@ and nixpkgs revision across desktop companions:
     };
 
     d2b-toolkit = {
-      url = "github:vicondoa/d2b-toolkit/fde6af8b842718e7150f5056d4eba73093d4ad77";
+      url = "github:vicondoa/d2b-toolkit/v0.2.0";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
