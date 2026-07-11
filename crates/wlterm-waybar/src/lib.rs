@@ -1,7 +1,7 @@
 //! Waybar output helpers.
 
 use serde::Serialize;
-use wlterm_core::{Model, ShellVisualState, VmPowerState};
+use wlterm_core::{Model, ProviderKind, ShellVisualState, VmPowerState};
 use wlterm_ui::RenderedAsyncError;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -20,6 +20,7 @@ pub struct WaybarCounts {
     pub online_vms: usize,
     pub offline_vms: usize,
     pub unknown_vms: usize,
+    pub unsafe_local_workloads: usize,
     pub renderable_errors: usize,
 }
 
@@ -31,6 +32,9 @@ impl WaybarStatus {
     pub fn from_model(model: &Model) -> Self {
         let mut counts = WaybarCounts::default();
         for vm in model.vms() {
+            if vm.provider_kind == ProviderKind::UnsafeLocal {
+                counts.unsafe_local_workloads += 1;
+            }
             match vm.power_state {
                 VmPowerState::Online => counts.online_vms += 1,
                 VmPowerState::Offline => counts.offline_vms += 1,
@@ -55,7 +59,15 @@ impl WaybarStatus {
             .iter()
             .filter(|error| RenderedAsyncError::from_core(error).is_some())
             .count();
-        Self::from_counts(counts)
+        let mut status = Self::from_counts(counts);
+        if let Some(remediation) = model.global_remediation() {
+            status.tooltip.push_str("; ");
+            status.tooltip.push_str(remediation.message);
+            if status.class == "idle" {
+                status.class = "error".to_string();
+            }
+        }
+        status
     }
 
     pub fn from_counts(counts: WaybarCounts) -> Self {
@@ -81,6 +93,12 @@ impl WaybarStatus {
         }
         if counts.renderable_errors > 0 {
             tooltip.push_str(&format!("; {} error(s)", counts.renderable_errors));
+        }
+        if counts.unsafe_local_workloads > 0 {
+            tooltip.push_str(&format!(
+                "; {} unsafe-local workload(s): NO ISOLATION",
+                counts.unsafe_local_workloads
+            ));
         }
         if counts == WaybarCounts::default() {
             tooltip = "d2b-wlterm ready".to_string();

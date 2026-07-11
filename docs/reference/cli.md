@@ -1,26 +1,27 @@
 # CLI reference
 
-Current commands:
+Shell commands accept a canonical workload target. A legacy local VM name is
+resolved through public workload inventory for compatibility.
 
-- `d2b-wlterm name [seed]` prints a deterministic friendly name.
-- `d2b-wlterm waybar` prints a Waybar JSON payload with active-shell and
-  error state.
-- `d2b-wlterm state`, `control-center`, or `quickshell` prints the
-  frontend-neutral control-center JSON shape.
-- `d2b-wlterm prompt-name [shell]` prints the shell-name prompt state, using a
-  generated default when the text field is empty.
-- `d2b-wlterm already-attached [focus-existing|prompt|force-open]` prints the
-  UI presentation mode for an attached shell fallback.
-- `d2b-wlterm list <vm>` lists shell sessions through the d2b public socket.
-- `d2b-wlterm create <vm> [shell]` creates a shell attachment and disconnects
-  the launcher view without killing the shell.
-- `d2b-wlterm open <vm> <shell> [--force]` opens a shell attachment and
-  disconnects the launcher view without killing the shell.
-- `d2b-wlterm stop <vm> <shell> --confirm` maps Stop to a public-socket shell
-  kill; without `--confirm`, the command only reports that confirmation is
-  required.
-- `d2b-wlterm config` prints the default config scaffold.
+- `d2b-wlterm list <target>` lists persistent shell sessions.
+- `d2b-wlterm create <target> [shell]` creates an attachment, disconnects the
+  launcher view, and opens the configured proxied WezTerm window.
+- `d2b-wlterm open <target> <shell> [--force]` opens an existing shell.
+- `d2b-wlterm detach <target> <shell>` disconnects an attachment without
+  killing the shell.
+- `d2b-wlterm stop <target> <shell> --confirm` kills the named shell. Without
+  `--confirm`, no daemon request is sent.
+- `d2b-wlterm waybar` emits Waybar JSON.
+- `d2b-wlterm state` or `status-json` emits control-center JSON.
+- `d2b-wlterm control-center` or `quickshell` toggles the Quickshell panel.
+- `d2b-wlterm prompt-name [shell]`, `already-attached`, `config`, and
+  `async-error` expose frontend support state.
 
-The CLI is intentionally small. Public-socket transport remains behind the
-toolkit-backed adapter boundary, which refuses broker sockets and redacts daemon
-error details to bounded kind plus trace/correlation values.
+Discovery and shell dispatch use only d2bd's public socket. The CLI does not
+invoke `d2b list`, inspect private artifacts, connect to the broker/helper, or
+fall back to SSH or a host shell. Unsafe-local actions are disabled when
+`unsafe-local-shell-v1` is not negotiated and report an update remediation.
+
+Errors contain bounded kind and correlation values. Opaque handles, terminal
+bytes, shell output, argv, environment, cwd, and private paths are never
+rendered.

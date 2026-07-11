@@ -1,55 +1,51 @@
 # d2b-wlterm
 
-`d2b-wlterm` is the planned Wayland terminal launcher surface for d2b. This
-repository currently contains core VM/session models, a d2b toolkit adapter
-boundary, Waybar output helpers, UI state concepts, a CLI binary, and a Home
-Manager module.
+`d2b-wlterm` 0.2.0 is the Wayland terminal launcher companion for persistent
+d2b workload shells. It provides a Rust model/client boundary, Waybar output,
+a Quickshell control center, and a Home Manager module.
 
-## Current status
+## Behavior
 
-Implemented:
+- Discovers workloads directly from the negotiated d2bd public socket through
+  d2b-toolkit 0.2.0.
+- Shows only workloads advertising both `persistent-shell` and a shell launcher
+  item.
+- Addresses shell operations by canonical target, such as
+  `builder.dev.d2b` or `tools.host.d2b`; legacy local VM names remain accepted.
+- Supports first-class local VMs without `legacyVmName`.
+- Groups workloads by realm while preserving realm accent rails.
+- Shows provider kind, isolation, session persistence, availability, and typed
+  remediation. `unsafe-local` is labeled **NO ISOLATION**.
+- Requires `unsafe-local-shell-v1` before exposing unsafe-local shell actions.
+- Sends create/list/open/detach/confirmed-stop through d2b-toolkit shell
+  methods. It never discovers through the CLI or reads host-private state.
+- Opens WezTerm only through `d2b-wayland-proxy` and waits for typed
+  first-client readiness. Proxy failure has no direct-compositor fallback.
 
-- bounded friendly random-name allocation for terminal sessions;
-- core reducer and action planner for VM/session state;
-- offline VM guards that disable shell list/create/open actions;
-- Stop confirmation, already-attached Open, and async error-display models;
-- `d2b-wlterm` CLI with public-socket shell list, open/create, and
-  confirmed stop commands;
-- `homeManagerModules.default` with package install, `config.toml` rendering,
-  Waybar integration, and a Quickshell control-center state surface;
-- safe UI rendering for shell labels, manual create-name prompts,
-  already-attached fallbacks, and async errors with bounded digest/correlation
-  details;
-- a local `d2b-toolkit`/`d2b-client` boundary for public daemon shell actions;
-- realm-aware VM discovery metadata from `d2b list --json`, preserving
-  d2b-provided canonical targets and falling back to `<vm>.local.d2b` for local
-  VMs while the current shell public-socket verbs still address the local VM id;
-- realm/workload grouping: `state`/`status-json` output includes a `realmGroups`
-  array that lists shell-capable workloads organized by the realm extracted from
-  each workload's canonical target (`<workload>.<realm>.d2b`). The Quickshell
-  panel shows realm section headers when multiple realms are present and displays
-  each workload's canonical target as a subtitle in its VM card.
-
-The d2b integration crate uses only the public daemon socket. Stop dispatches a
-shell kill only after confirmation, and closing an attached terminal view sends a
-disconnect request rather than killing the shell.
+Stop remains explicitly confirmed, and an attached shell keeps the existing
+focus/prompt/force-open behavior. Closing a terminal attachment detaches it; it
+does not kill the persistent session.
 
 ## Development
 
+Use the shared target directory for local validation:
+
 ```bash
+export CARGO_TARGET_DIR=/home/paydro/.cache/d2b-wlterm-target
+cargo fmt --all -- --check
 cargo test --workspace
-cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 nix flake check
 ```
 
 ## Flake inputs
 
-Use one `nixpkgs` input across d2b, the toolkit, and this launcher. If you also
-use the WeezTerm flake, make it follow the same toolkit input:
+This release pins d2b-toolkit 0.2.0 at
+`v0.2.0` (resolved by the lock file to
+`fde6af8b842718e7150f5056d4eba73093d4ad77`). Consumers should keep one toolkit
+and nixpkgs revision across desktop companions:
 
 ```nix
-{ inputs, pkgs, ... }:
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -60,12 +56,12 @@ use the WeezTerm flake, make it follow the same toolkit input:
     };
 
     d2b-toolkit = {
-      url = "github:vicondoa/d2b-toolkit";
+      url = "github:vicondoa/d2b-toolkit/v0.2.0";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
     d2b-wlterm = {
-      url = "github:vicondoa/d2b-wlterm";
+      url = "github:vicondoa/d2b-wlterm/v0.2.0";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.d2b-toolkit.follows = "d2b-toolkit";
     };
@@ -79,9 +75,8 @@ use the WeezTerm flake, make it follow the same toolkit input:
 }
 ```
 
-The flake exports `packages.${system}.default`,
-`homeManagerModules.default`, and a `checks.${system}.home-manager-module`
-evaluation check for the rendered Home Manager config and Waybar snippet.
+The flake exports `packages.${system}.default`, `apps.${system}.default`,
+`homeManagerModules.default`, and package/Home Manager checks.
 
 ## Home Manager
 
@@ -91,14 +86,19 @@ evaluation check for the rendered Home Manager config and Waybar snippet.
 
   programs.d2b-wlterm = {
     enable = true;
-    publicSocketPath = "$XDG_RUNTIME_DIR/d2b/public.sock";
+    publicSocketPath = "/run/d2b/public.sock";
     weztermCommand = [
-      "${inputs.weezterm.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/weezterm"
+      "${inputs.weezterm.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/wezterm"
       "start"
       "--"
     ];
+    waylandProxyCommand = [ "d2b-wayland-proxy" ];
     waybar.enable = true;
     quickshell.enable = true;
   };
 }
 ```
+
+The module writes only user configuration. Inventory and shell operations use
+the public daemon socket; the launcher never reads bundle artifacts, root state,
+the broker socket, or the private unsafe-local helper transport.

@@ -1,6 +1,7 @@
 use d2b_toolkit_core::{
-    FeatureFlag, HelloOk, HelloResponse, PublicRequest, PublicResponse, ShellListEntry,
+    HelloOk, HelloResponse, KnownFeatureFlag, PublicRequest, PublicResponse, ShellListEntry,
     ShellListResult, ShellName, ShellOp, ShellOpResponse, ShellSessionState, Version,
+    WorkloadListResult, WorkloadOp, WorkloadOpResponse, WorkloadPublicSummary,
 };
 use nix::sys::socket::{
     accept4, bind, listen, recv, send, socket, AddressFamily, Backlog, MsgFlags, SockFlag,
@@ -55,7 +56,8 @@ fn unique_runtime_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
-    std::env::temp_dir().join(format!("d2b-wlterm-ipc-{suffix}-{}", std::process::id()))
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("d2b-wlterm-ipc-{suffix}-{}", std::process::id()))
 }
 
 struct RuntimeDir {
@@ -98,63 +100,40 @@ fn cli_list_uses_real_public_socket_frames() {
     let listener = bind_seqpacket(&socket_path);
 
     let server = thread::spawn(move || {
-        let stream = accept_seqpacket(&listener);
-
-        let hello = read_frame(&stream);
-        let hello: serde_json::Value = serde_json::from_slice(&hello).expect("hello json");
-        assert_eq!(
-            hello.get("type").and_then(serde_json::Value::as_str),
-            Some("hello")
-        );
-        write_json_frame(
-            &stream,
-            &HelloResponse::HelloOk(HelloOk {
-                server_version: Version::new("0.4.0"),
-                selected_version: Version::new("0.4.0"),
-                capabilities: vec![FeatureFlag::new("typed-errors")],
-            }),
-        );
-
-        let request = read_frame(&stream);
-        let request: PublicRequest = serde_json::from_slice(&request).expect("public request");
-        let (op_id, vm) = match request {
-            PublicRequest::Shell {
+        let inventory = accept_seqpacket(&listener);
+        serve_hello(&inventory);
+        let request: PublicRequest =
+            serde_json::from_slice(&read_frame(&inventory)).expect("inventory request");
+        let op_id = match request {
+            PublicRequest::Workload {
                 op_id,
-                op: ShellOp::List(args),
-            } => (op_id, args.vm),
-            other => panic!("unexpected request: {other:?}"),
+                op: WorkloadOp::List(_),
+            } => op_id,
+            other => panic!("unexpected inventory request: {other:?}"),
         };
-        assert_eq!(vm, "work");
-
         write_json_frame(
-            &stream,
-            &PublicResponse::Shell {
+            &inventory,
+            &PublicResponse::Workload {
                 op_id,
-                response: ShellOpResponse::List(ShellListResult {
-                    default_name: ShellName::new("default"),
-                    sessions: vec![
-                        ShellListEntry {
-                            name: ShellName::new("default"),
-                            state: ShellSessionState::Detached,
-                            attached: false,
-                            is_default: true,
-                        },
-                        ShellListEntry {
-                            name: ShellName::new("build"),
-                            state: ShellSessionState::Attached,
-                            attached: true,
-                            is_default: false,
-                        },
-                    ],
+                response: WorkloadOpResponse::List(WorkloadListResult {
+                    workloads: vec![shell_workload()],
                 }),
             },
         );
+
+        let list = accept_seqpacket(&listener);
+        serve_hello(&list);
+        serve_shell_list(&list);
     });
 
     let output = Command::new(env!("CARGO_BIN_EXE_d2b-wlterm"))
         .env("D2B_PUBLIC_SOCKET", &socket_path)
+        .env(
+            "D2B_WLTERM_CONFIG",
+            runtime_dir.path().join("missing-config.toml"),
+        )
         .arg("list")
-        .arg("work")
+        .arg("corp-vm")
         .output()
         .expect("run d2b-wlterm");
 
@@ -170,4 +149,99 @@ fn cli_list_uses_real_public_socket_frames() {
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
     assert!(stdout.contains("default\tdetached\tdefault"), "{stdout}");
     assert!(stdout.contains("build\tattached"), "{stdout}");
+}
+
+fn serve_hello(stream: &OwnedFd) {
+    let hello: serde_json::Value = serde_json::from_slice(&read_frame(stream)).expect("hello json");
+    assert_eq!(
+        hello.get("type").and_then(serde_json::Value::as_str),
+        Some("hello")
+    );
+    write_json_frame(
+        stream,
+        &HelloResponse::HelloOk(HelloOk {
+            server_version: Version::new("0.4.0"),
+            selected_version: Version::new("0.4.0"),
+            capabilities: vec![
+                KnownFeatureFlag::TypedErrors.wire_value(),
+                KnownFeatureFlag::ConfiguredLaunchV1.wire_value(),
+                KnownFeatureFlag::UnsafeLocalProviderV1.wire_value(),
+                KnownFeatureFlag::UnsafeLocalShellV1.wire_value(),
+            ],
+        }),
+    );
+}
+
+fn serve_shell_list(stream: &OwnedFd) {
+    let request: PublicRequest =
+        serde_json::from_slice(&read_frame(stream)).expect("shell request");
+    let op_id = match request {
+        PublicRequest::Shell {
+            op_id,
+            op: ShellOp::List(args),
+        } => {
+            assert_eq!(args.vm, "corp-vm.work.d2b");
+            op_id
+        }
+        other => panic!("unexpected request: {other:?}"),
+    };
+    write_json_frame(
+        stream,
+        &PublicResponse::Shell {
+            op_id,
+            response: ShellOpResponse::List(ShellListResult {
+                default_name: ShellName::new("default").unwrap(),
+                sessions: vec![
+                    ShellListEntry {
+                        name: ShellName::new("default").unwrap(),
+                        state: ShellSessionState::Detached,
+                        attached: false,
+                        is_default: true,
+                    },
+                    ShellListEntry {
+                        name: ShellName::new("build").unwrap(),
+                        state: ShellSessionState::Attached,
+                        attached: true,
+                        is_default: false,
+                    },
+                ],
+            }),
+        },
+    );
+}
+
+fn shell_workload() -> WorkloadPublicSummary {
+    serde_json::from_value(serde_json::json!({
+        "identity": {
+            "workloadId": "corp-vm",
+            "workloadName": "Corporate VM",
+            "realmId": "work",
+            "realmPath": ["work"],
+            "canonicalTarget": "corp-vm.work.d2b",
+            "legacyVmName": "corp-vm",
+            "runtimeKind": "nixos",
+            "providerId": "local-cloud-hypervisor"
+        },
+        "providerKind": "local-vm",
+        "state": "running",
+        "executionPosture": {
+            "isolation": "virtual-machine",
+            "environment": "runtime-managed",
+            "displayEnvironment": "runtime-managed",
+            "executionIdentity": "workload-user",
+            "sessionPersistence": "runtime-managed"
+        },
+        "availability": "ready",
+        "graphicalPosture": "proxied",
+        "capabilities": ["configured-launch", "persistent-shell", "pty", "window-forwarding"],
+        "launcherItems": [{
+            "id": "terminal",
+            "name": "Terminal",
+            "icon": {"name": "terminal"},
+            "type": "shell",
+            "graphical": false,
+            "capabilities": ["persistent-shell", "pty"]
+        }]
+    }))
+    .expect("valid toolkit fixture")
 }

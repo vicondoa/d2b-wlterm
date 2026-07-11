@@ -4,26 +4,34 @@
 //! plans through `wlterm-core`, executes through `d2b-client`, and never talks
 //! to the privileged broker or mutates host state directly.
 
+use async_io::Async;
 use d2b_client::{
     read_hello_response, send_hello, AttachedShell, ClientError, FrameBounds, PublicSocketClient,
 };
 use d2b_toolkit_core::{
-    Hello, KnownFeatureFlag, ShellKillResult, ShellListResult, ShellName, ShellOp,
-    ShellSessionState, SocketClass, TerminalSize, ToolkitError,
+    Capability, GraphicalLaunchPosture, Hello, HelloResponse, IsolationPosture as ToolkitIsolation,
+    KnownFeatureFlag, LauncherItemKind, SessionPersistencePosture, ShellKillResult,
+    ShellListResult, ShellName, ShellOp, ShellSessionState, SocketClass, TerminalSize,
+    ToolkitError, WorkloadAvailability, WorkloadListResult, WorkloadProviderKind,
+    WorkloadPublicSummary, WorkloadState,
 };
 use futures::executor::block_on;
+use futures::future::{select, Either};
 use futures::io::{AsyncRead, AsyncWrite};
 use sha2::{Digest, Sha256};
 use std::fmt;
+use std::future::Future;
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::path::Path;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use wlterm_core::friendly_name::FriendlyName;
 use wlterm_core::{
-    DisabledReason, PlannedAction, SafeCorrelation, ShellSession, ShellVisualState, VmId,
+    DisabledReason, IsolationPosture, PlannedAction, ProviderKind, SafeCorrelation,
+    SessionPersistence, ShellLauncherItem, ShellSession, ShellTarget, ShellVisualState,
+    TargetAvailability, TargetId, VmPowerState, WorkloadSummary,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,34 +69,56 @@ impl D2bActionBoundary {
         &self.config
     }
 
+    fn block_on_operation<F, T>(
+        &self,
+        action: &'static str,
+        trace: ActionTrace,
+        operation: F,
+    ) -> Result<T, D2bClientError>
+    where
+        F: Future<Output = Result<T, D2bClientError>>,
+    {
+        let timeout = Duration::from_millis(self.config.operation_timeout_ms);
+        block_on(async {
+            let operation = Box::pin(operation);
+            let timer = Box::pin(async_io::Timer::after(timeout));
+            match select(operation, timer).await {
+                Either::Left((result, _)) => result,
+                Either::Right(_) => Err(D2bClientError::timeout(action, trace)),
+            }
+        })
+    }
+
     pub fn plan_to_shell_op(&self, action: &PlannedAction) -> Option<ShellOp> {
         match action {
-            PlannedAction::ListSessions { vm } => {
+            PlannedAction::ListSessions { target } => {
                 Some(ShellOp::List(d2b_toolkit_core::ShellListArgs {
-                    vm: vm.as_str().to_string(),
+                    vm: target.id.as_str().to_string(),
                 }))
             }
-            PlannedAction::AttachShell { vm, name, force } => {
-                Some(ShellOp::Attach(d2b_toolkit_core::ShellAttachArgs {
-                    vm: vm.as_str().to_string(),
-                    name: name.as_ref().map(to_toolkit_shell_name),
-                    force: *force,
-                    initial_terminal_size: self.config.initial_terminal_size,
-                }))
-            }
-            PlannedAction::KillShell { vm, name } => {
+            PlannedAction::AttachShell {
+                target,
+                name,
+                force,
+            } => Some(ShellOp::Attach(d2b_toolkit_core::ShellAttachArgs {
+                vm: target.id.as_str().to_string(),
+                name: name.as_ref().map(to_toolkit_shell_name),
+                force: *force,
+                initial_terminal_size: self.config.initial_terminal_size,
+            })),
+            PlannedAction::KillShell { target, name } => {
                 Some(ShellOp::Kill(d2b_toolkit_core::ShellKillArgs {
-                    vm: vm.as_str().to_string(),
+                    vm: target.id.as_str().to_string(),
                     name: to_toolkit_shell_name(name),
                 }))
             }
-            PlannedAction::DetachShell { vm, name } => {
+            PlannedAction::DetachShell { target, name } => {
                 Some(ShellOp::Detach(d2b_toolkit_core::ShellDetachArgs {
-                    vm: vm.as_str().to_string(),
+                    vm: target.id.as_str().to_string(),
                     name: Some(to_toolkit_shell_name(name)),
                 }))
             }
-            PlannedAction::RefreshVms
+            PlannedAction::RefreshTargets
             | PlannedAction::FocusExistingShell { .. }
             | PlannedAction::PromptAlreadyAttached { .. }
             | PlannedAction::PromptStop { .. }
@@ -116,18 +146,131 @@ impl D2bActionBoundary {
                 },
             )?;
         let bounds = FrameBounds::default();
-        block_on(async {
+        let response = self.block_on_operation("connect", trace.clone(), async {
             send_hello(
                 &mut transport,
-                &Hello::toolkit_client(vec![KnownFeatureFlag::TypedErrors.wire_value()]),
+                &Hello::toolkit_client(vec![
+                    KnownFeatureFlag::TypedErrors.wire_value(),
+                    KnownFeatureFlag::ConfiguredLaunchV1.wire_value(),
+                    KnownFeatureFlag::UnsafeLocalProviderV1.wire_value(),
+                    KnownFeatureFlag::UnsafeLocalShellV1.wire_value(),
+                ]),
                 bounds,
             )
-            .await?;
-            read_hello_response(&mut transport, bounds).await?;
-            Ok::<(), ClientError>(())
-        })
-        .map_err(|err| D2bClientError::from_client_error("connect", trace, err))?;
-        Ok(PublicSocketClient::with_bounds(transport, bounds))
+            .await
+            .map_err(|error| D2bClientError::from_client_error("connect", trace.clone(), error))?;
+            read_hello_response(&mut transport, bounds)
+                .await
+                .map_err(|error| D2bClientError::from_client_error("connect", trace, error))
+        })?;
+        let HelloResponse::HelloOk(hello) = response else {
+            return Err(D2bClientError::protocol(
+                "connect",
+                ActionTrace::for_label("connect-public-socket"),
+                "hello-rejected",
+            ));
+        };
+        Ok(PublicSocketClient::with_bounds_and_negotiated_capabilities(
+            transport,
+            bounds,
+            hello.negotiated_capabilities(),
+        ))
+    }
+
+    pub fn inventory_blocking(&self) -> Result<Vec<WorkloadSummary>, D2bClientError> {
+        let client = self.connect()?;
+        let outcome = self.block_on_operation(
+            "inventory",
+            ActionTrace::for_label("workload-inventory"),
+            self.inventory_with_client(client),
+        )?;
+        Ok(outcome.workloads)
+    }
+
+    pub fn discover_blocking(&self) -> Result<Vec<WorkloadSummary>, D2bClientError> {
+        let client = self.connect()?;
+        let outcome = self.block_on_operation(
+            "inventory",
+            ActionTrace::for_label("workload-inventory"),
+            self.discover_with_client(client),
+        )?;
+        Ok(outcome.workloads)
+    }
+
+    pub async fn discover_with_client<T>(
+        &self,
+        mut client: PublicSocketClient<T>,
+    ) -> Result<D2bInventoryOutcome<T>, D2bClientError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        let trace = ActionTrace::for_label("workload-inventory");
+        let supports_unsafe_shell = client
+            .negotiated_capabilities()
+            .is_some_and(|caps| caps.has(KnownFeatureFlag::UnsafeLocalShellV1));
+        let inventory = client
+            .workload_inventory()
+            .await
+            .map_err(|err| D2bClientError::from_client_error("inventory", trace.clone(), err))?;
+        let workloads = shell_workloads_from_inventory(&inventory, supports_unsafe_shell)
+            .map_err(|kind| D2bClientError::protocol("inventory", trace, kind))?;
+        Ok(D2bInventoryOutcome { client, workloads })
+    }
+
+    pub async fn inventory_with_client<T>(
+        &self,
+        client: PublicSocketClient<T>,
+    ) -> Result<D2bInventoryOutcome<T>, D2bClientError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        let trace = ActionTrace::for_label("workload-inventory");
+        let outcome = self.discover_with_client(client).await?;
+        let mut client = outcome.client;
+        let mut workloads = outcome.workloads;
+        let supports_unsafe_shell = client
+            .negotiated_capabilities()
+            .is_some_and(|caps| caps.has(KnownFeatureFlag::UnsafeLocalShellV1));
+
+        if supports_unsafe_shell
+            && workloads
+                .iter()
+                .any(WorkloadSummary::requires_unsafe_local_shell)
+        {
+            client.require_unsafe_local_shell().map_err(|err| {
+                D2bClientError::from_client_error("inventory", trace.clone(), err)
+            })?;
+        }
+
+        for workload in &mut workloads {
+            if !workload.actions_available() {
+                continue;
+            }
+            match client
+                .shell_list(workload.target.as_str().to_string())
+                .await
+            {
+                Ok(list) => {
+                    workload.sessions = shell_list_to_sessions(&list)
+                        .map_err(|kind| D2bClientError::protocol("list", trace.clone(), kind))?;
+                }
+                Err(error) => match availability_from_shell_error(&error) {
+                    Some(availability) => {
+                        workload.availability = availability;
+                        workload.sessions.clear();
+                    }
+                    None => {
+                        return Err(D2bClientError::from_client_error(
+                            "list",
+                            trace.clone(),
+                            error,
+                        ));
+                    }
+                },
+            }
+        }
+
+        Ok(D2bInventoryOutcome { client, workloads })
     }
 
     pub fn execute_blocking(
@@ -135,7 +278,12 @@ impl D2bActionBoundary {
         action: PlannedAction,
     ) -> Result<D2bActionOutcome<BlockingUnixTransport>, D2bClientError> {
         let client = self.connect()?;
-        block_on(self.execute_with_client(client, action))
+        let action_label = action.metrics_label_value();
+        self.block_on_operation(
+            action_label,
+            ActionTrace::for_label(action_label),
+            self.execute_with_client(client, action),
+        )
     }
 
     pub async fn execute_with_client<T>(
@@ -148,38 +296,51 @@ impl D2bActionBoundary {
     {
         let trace = ActionTrace::for_label(action.metrics_label_value());
         match action {
-            PlannedAction::RefreshVms => Ok(D2bActionOutcome::RefreshQueued { client }),
+            PlannedAction::RefreshTargets => Ok(D2bActionOutcome::RefreshQueued { client }),
             PlannedAction::Disabled { reason } => Ok(D2bActionOutcome::Disabled { client, reason }),
-            PlannedAction::FocusExistingShell { vm, name } => {
-                Ok(D2bActionOutcome::FocusExisting { client, vm, name })
+            PlannedAction::FocusExistingShell { target, name } => {
+                Ok(D2bActionOutcome::FocusExisting {
+                    client,
+                    target: target.id,
+                    name,
+                })
             }
-            PlannedAction::PromptAlreadyAttached { vm, name } => {
-                Ok(D2bActionOutcome::PromptAlreadyAttached { client, vm, name })
+            PlannedAction::PromptAlreadyAttached { target, name } => {
+                Ok(D2bActionOutcome::PromptAlreadyAttached {
+                    client,
+                    target: target.id,
+                    name,
+                })
             }
-            PlannedAction::PromptStop { vm, name } => Ok(D2bActionOutcome::PromptStop {
+            PlannedAction::PromptStop { target, name } => Ok(D2bActionOutcome::PromptStop {
                 client,
-                vm,
+                target: target.id,
                 name,
                 requires_confirmation: true,
             }),
-            PlannedAction::ListSessions { vm } => {
-                let mut client = client;
+            PlannedAction::ListSessions { target } => {
+                let mut client = prepare_shell_client(client, &target, "list", &trace)?;
                 let list = client
-                    .shell_list(vm.as_str().to_string())
+                    .shell_list(target.id.as_str().to_string())
                     .await
                     .map_err(|err| D2bClientError::from_client_error("list", trace.clone(), err))?;
                 let sessions = shell_list_to_sessions(&list)
                     .map_err(|kind| D2bClientError::protocol("list", trace.clone(), kind))?;
                 Ok(D2bActionOutcome::Listed {
                     client,
-                    vm,
+                    target: target.id,
                     sessions,
                 })
             }
-            PlannedAction::AttachShell { vm, name, force } => {
+            PlannedAction::AttachShell {
+                target,
+                name,
+                force,
+            } => {
+                let client = prepare_shell_client(client, &target, "open", &trace)?;
                 let attached = client
                     .attach_shell(
-                        vm.as_str().to_string(),
+                        target.id.as_str().to_string(),
                         name.as_ref().map(to_toolkit_shell_name),
                         force,
                         self.config.initial_terminal_size,
@@ -190,37 +351,40 @@ impl D2bActionBoundary {
                     .map_err(|kind| D2bClientError::protocol("open", trace.clone(), kind))?;
                 Ok(D2bActionOutcome::Attached {
                     attached,
-                    vm,
+                    target: target.id,
                     resolved_name,
                     force,
                     trace,
                 })
             }
-            PlannedAction::KillShell { vm, name } => {
-                let mut client = client;
+            PlannedAction::KillShell { target, name } => {
+                let mut client = prepare_shell_client(client, &target, "stop", &trace)?;
                 let result = client
-                    .shell_kill(vm.as_str().to_string(), to_toolkit_shell_name(&name))
+                    .shell_kill(target.id.as_str().to_string(), to_toolkit_shell_name(&name))
                     .await
                     .map_err(|err| D2bClientError::from_client_error("stop", trace.clone(), err))?;
                 Ok(D2bActionOutcome::Killed {
                     client,
-                    vm,
+                    target: target.id,
                     name,
                     result,
                     trace,
                 })
             }
-            PlannedAction::DetachShell { vm, name } => {
-                let mut client = client;
+            PlannedAction::DetachShell { target, name } => {
+                let mut client = prepare_shell_client(client, &target, "detach", &trace)?;
                 let result = client
-                    .shell_detach(vm.as_str().to_string(), Some(to_toolkit_shell_name(&name)))
+                    .shell_detach(
+                        target.id.as_str().to_string(),
+                        Some(to_toolkit_shell_name(&name)),
+                    )
                     .await
                     .map_err(|err| {
                         D2bClientError::from_client_error("detach", trace.clone(), err)
                     })?;
                 Ok(D2bActionOutcome::Detached {
                     client,
-                    vm,
+                    target: target.id,
                     name,
                     result,
                     trace,
@@ -230,18 +394,236 @@ impl D2bActionBoundary {
     }
 }
 
-fn connect_seqpacket(path: &str) -> io::Result<OwnedFd> {
-    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, UnixAddr};
+pub struct D2bInventoryOutcome<T> {
+    pub client: PublicSocketClient<T>,
+    pub workloads: Vec<WorkloadSummary>,
+}
+
+impl<T> fmt::Debug for D2bInventoryOutcome<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("D2bInventoryOutcome")
+            .field("workloads_len", &self.workloads.len())
+            .finish()
+    }
+}
+
+fn prepare_shell_client<T>(
+    mut client: PublicSocketClient<T>,
+    target: &ShellTarget,
+    action: &'static str,
+    trace: &ActionTrace,
+) -> Result<PublicSocketClient<T>, D2bClientError>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    if target.provider_kind.is_unsafe_local() {
+        client
+            .require_unsafe_local_shell()
+            .map_err(|err| D2bClientError::from_client_error(action, trace.clone(), err))?;
+    }
+    Ok(client)
+}
+
+fn shell_workloads_from_inventory(
+    inventory: &WorkloadListResult,
+    supports_unsafe_shell: bool,
+) -> Result<Vec<WorkloadSummary>, &'static str> {
+    inventory
+        .workloads
+        .iter()
+        .filter(|workload| workload.capabilities().has(Capability::PersistentShell))
+        .filter_map(|workload| {
+            workload
+                .launcher_items()
+                .iter()
+                .find(|item| {
+                    item.kind() == LauncherItemKind::Shell
+                        && item.capabilities().has(Capability::PersistentShell)
+                })
+                .map(|item| (workload, item))
+        })
+        .map(|(workload, shell_item)| {
+            workload_to_summary(workload, shell_item, supports_unsafe_shell)
+        })
+        .collect()
+}
+
+fn workload_to_summary(
+    workload: &WorkloadPublicSummary,
+    shell_item: &d2b_toolkit_core::LauncherItemSummary,
+    supports_unsafe_shell: bool,
+) -> Result<WorkloadSummary, &'static str> {
+    let target = TargetId::new(workload.identity().target().as_str().to_string())
+        .map_err(|_| "invalid-workload-target")?;
+    let compatibility_id = workload
+        .identity()
+        .legacy_vm_name()
+        .map(|legacy| legacy.as_str())
+        .unwrap_or_else(|| workload.identity().workload_id().as_str());
+    let compatibility_id =
+        TargetId::new(compatibility_id.to_string()).map_err(|_| "invalid-workload-id")?;
+    let provider_kind = map_provider_kind(workload.provider_kind());
+    let availability = map_availability(workload.availability(), workload.graphical_posture());
+    let power_state = map_power_state(
+        workload.state(),
+        workload.provider_kind(),
+        workload.availability(),
+    );
+    let mut summary = WorkloadSummary::discovered(target, compatibility_id, power_state);
+    summary.legacy_vm_name = workload
+        .identity()
+        .legacy_vm_name()
+        .map(|legacy| legacy.as_str().to_string());
+    summary.workload_name = workload.identity().workload_name().map(str::to_string);
+    summary.provider_kind = provider_kind;
+    summary.isolation_posture = match workload.execution_posture().isolation() {
+        ToolkitIsolation::VirtualMachine => IsolationPosture::VirtualMachine,
+        ToolkitIsolation::ProviderManaged => IsolationPosture::ProviderManaged,
+        ToolkitIsolation::UnsafeLocal => IsolationPosture::UnsafeLocal,
+    };
+    summary.session_persistence = match workload.execution_posture().session_persistence() {
+        SessionPersistencePosture::RuntimeManaged => SessionPersistence::RuntimeManaged,
+        SessionPersistencePosture::UserManagerLifetime => SessionPersistence::UserManagerLifetime,
+    };
+    summary.availability = availability;
+    summary.shell_feature_available = !provider_kind.is_unsafe_local() || supports_unsafe_shell;
+    summary.shell_launcher_item = Some(ShellLauncherItem {
+        id: shell_item.id().as_str().to_string(),
+        name: shell_item.name().to_string(),
+    });
+    Ok(summary)
+}
+
+fn map_provider_kind(kind: WorkloadProviderKind) -> ProviderKind {
+    match kind {
+        WorkloadProviderKind::LocalVm => ProviderKind::LocalVm,
+        WorkloadProviderKind::QemuMedia => ProviderKind::QemuMedia,
+        WorkloadProviderKind::ProviderManaged => ProviderKind::ProviderManaged,
+        WorkloadProviderKind::UnsafeLocal => ProviderKind::UnsafeLocal,
+    }
+}
+
+fn map_power_state(
+    state: WorkloadState,
+    provider: WorkloadProviderKind,
+    availability: WorkloadAvailability,
+) -> VmPowerState {
+    if provider == WorkloadProviderKind::UnsafeLocal {
+        return if availability == WorkloadAvailability::Ready {
+            VmPowerState::Online
+        } else {
+            VmPowerState::Unknown
+        };
+    }
+    match state {
+        WorkloadState::Running => VmPowerState::Online,
+        WorkloadState::Stopped | WorkloadState::Stopping => VmPowerState::Offline,
+        WorkloadState::Starting | WorkloadState::Failed => VmPowerState::Unknown,
+    }
+}
+
+fn map_availability(
+    availability: WorkloadAvailability,
+    graphical: GraphicalLaunchPosture,
+) -> TargetAvailability {
+    match availability {
+        WorkloadAvailability::Ready => match graphical {
+            GraphicalLaunchPosture::GraphicalSessionInactive => {
+                TargetAvailability::GraphicalSessionInactive
+            }
+            GraphicalLaunchPosture::WaylandUnavailable => TargetAvailability::WaylandUnavailable,
+            GraphicalLaunchPosture::ProxyUnavailable => TargetAvailability::ProxyUnavailable,
+            GraphicalLaunchPosture::Proxied | GraphicalLaunchPosture::NotApplicable => {
+                TargetAvailability::Ready
+            }
+        },
+        WorkloadAvailability::HelperUnavailable => TargetAvailability::HelperUnavailable,
+        WorkloadAvailability::HelperStale => TargetAvailability::HelperStale,
+        WorkloadAvailability::UserManagerUnavailable => TargetAvailability::UserManagerUnavailable,
+        WorkloadAvailability::GraphicalSessionInactive => {
+            TargetAvailability::GraphicalSessionInactive
+        }
+        WorkloadAvailability::WaylandUnavailable => TargetAvailability::WaylandUnavailable,
+        WorkloadAvailability::ProxyUnavailable => TargetAvailability::ProxyUnavailable,
+        WorkloadAvailability::Degraded => TargetAvailability::Degraded,
+    }
+}
+
+fn availability_from_shell_error(error: &ClientError) -> Option<TargetAvailability> {
+    let ClientError::Daemon { kind } = error else {
+        return None;
+    };
+    Some(if kind.contains("helper-unavailable") {
+        TargetAvailability::HelperUnavailable
+    } else if kind.contains("helper-stale") {
+        TargetAvailability::HelperStale
+    } else if kind.contains("user-manager-unavailable") {
+        TargetAvailability::UserManagerUnavailable
+    } else if kind.contains("graphical-session-inactive") {
+        TargetAvailability::GraphicalSessionInactive
+    } else if kind.contains("wayland-unavailable") {
+        TargetAvailability::WaylandUnavailable
+    } else if kind.contains("proxy-unavailable") {
+        TargetAvailability::ProxyUnavailable
+    } else {
+        TargetAvailability::Degraded
+    })
+}
+
+fn connect_seqpacket(path: &str, connect_timeout: Duration) -> io::Result<OwnedFd> {
+    use nix::errno::Errno;
+    use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+    use nix::sys::socket::{
+        connect, getsockopt, socket, sockopt, AddressFamily, SockFlag, SockType, UnixAddr,
+    };
 
     let fd = socket(
         AddressFamily::Unix,
         SockType::SeqPacket,
-        SockFlag::SOCK_CLOEXEC,
+        SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
         None,
     )
     .map_err(errno_to_io)?;
     let addr = UnixAddr::new(Path::new(path)).map_err(errno_to_io)?;
-    connect(fd.as_raw_fd(), &addr).map_err(errno_to_io)?;
+    match connect(fd.as_raw_fd(), &addr) {
+        Ok(()) | Err(Errno::EISCONN) => {}
+        Err(Errno::EINPROGRESS | Errno::EALREADY | Errno::EAGAIN | Errno::EINTR) => {
+            let deadline = Instant::now().checked_add(connect_timeout).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "d2bd connect timeout exceeds the supported range",
+                )
+            })?;
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "timed out connecting to d2bd public socket",
+                    ));
+                }
+                let timeout = PollTimeout::try_from(remaining)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+                let mut pollfd = [PollFd::new(fd.as_fd(), PollFlags::POLLOUT)];
+                match poll(&mut pollfd, timeout) {
+                    Ok(0) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "timed out connecting to d2bd public socket",
+                        ));
+                    }
+                    Ok(_) => break,
+                    Err(Errno::EINTR) => continue,
+                    Err(error) => return Err(errno_to_io(error)),
+                }
+            }
+            let socket_error = getsockopt(&fd, sockopt::SocketError).map_err(errno_to_io)?;
+            if socket_error != 0 {
+                return Err(io::Error::from_raw_os_error(socket_error));
+            }
+        }
+        Err(error) => return Err(errno_to_io(error)),
+    }
     Ok(fd)
 }
 
@@ -252,17 +634,19 @@ fn errno_to_io(error: nix::errno::Errno) -> io::Error {
 const MAX_PUBLIC_PACKET: usize = 1024 * 1024 + 4;
 
 pub struct BlockingUnixTransport {
-    fd: OwnedFd,
+    fd: Async<OwnedFd>,
     read_buf: Vec<u8>,
+    read_len: usize,
     read_pos: usize,
     write_buf: Vec<u8>,
 }
 
 impl BlockingUnixTransport {
-    fn connect(path: &str, _timeout: Duration) -> io::Result<Self> {
+    fn connect(path: &str, timeout: Duration) -> io::Result<Self> {
         Ok(Self {
-            fd: connect_seqpacket(path)?,
-            read_buf: Vec::new(),
+            fd: Async::new(connect_seqpacket(path, timeout)?)?,
+            read_buf: vec![0_u8; MAX_PUBLIC_PACKET],
+            read_len: 0,
             read_pos: 0,
             write_buf: Vec::new(),
         })
@@ -272,25 +656,43 @@ impl BlockingUnixTransport {
 impl AsyncRead for BlockingUnixTransport {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        if self.read_pos >= self.read_buf.len() {
-            let mut packet = vec![0_u8; MAX_PUBLIC_PACKET];
-            let len = nix::sys::socket::recv(
-                self.fd.as_raw_fd(),
-                &mut packet,
-                nix::sys::socket::MsgFlags::empty(),
-            )
-            .map_err(errno_to_io)?;
-            packet.truncate(len);
-            self.read_buf = packet;
-            self.read_pos = 0;
-            if self.read_buf.is_empty() {
-                return Poll::Ready(Ok(0));
+        if self.read_pos >= self.read_len {
+            loop {
+                let fd = self.fd.get_ref().as_raw_fd();
+                match nix::sys::socket::recv(
+                    fd,
+                    &mut self.read_buf,
+                    nix::sys::socket::MsgFlags::MSG_DONTWAIT
+                        | nix::sys::socket::MsgFlags::MSG_TRUNC,
+                ) {
+                    Ok(len) if len > self.read_buf.len() => {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "d2bd public socket packet exceeded the frame bound",
+                        )));
+                    }
+                    Ok(len) => {
+                        self.read_len = len;
+                        self.read_pos = 0;
+                        if self.read_len == 0 {
+                            return Poll::Ready(Ok(0));
+                        }
+                        break;
+                    }
+                    Err(nix::errno::Errno::EAGAIN) => match self.fd.poll_readable(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Ok(())) => continue,
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    },
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    Err(error) => return Poll::Ready(Err(errno_to_io(error))),
+                }
             }
         }
-        let available = &self.read_buf[self.read_pos..];
+        let available = &self.read_buf[self.read_pos..self.read_len];
         let len = available.len().min(buf.len());
         buf[..len].copy_from_slice(&available[..len]);
         self.read_pos += len;
@@ -304,25 +706,38 @@ impl AsyncWrite for BlockingUnixTransport {
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        if self.write_buf.len().saturating_add(buf.len()) > MAX_PUBLIC_PACKET {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "d2bd public socket packet exceeded the frame bound",
+            )));
+        }
         self.write_buf.extend_from_slice(buf);
         Poll::Ready(Ok(buf.len()))
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if !self.write_buf.is_empty() {
-            let sent = nix::sys::socket::send(
-                self.fd.as_raw_fd(),
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        while !self.write_buf.is_empty() {
+            match nix::sys::socket::send(
+                self.fd.get_ref().as_raw_fd(),
                 &self.write_buf,
-                nix::sys::socket::MsgFlags::empty(),
-            )
-            .map_err(errno_to_io)?;
-            if sent != self.write_buf.len() {
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "short write on public seqpacket socket",
-                )));
+                nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+            ) {
+                Ok(sent) if sent == self.write_buf.len() => self.write_buf.clear(),
+                Ok(_) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "short write on public seqpacket socket",
+                    )));
+                }
+                Err(nix::errno::Errno::EAGAIN) => match self.fd.poll_writable(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok(())) => continue,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                },
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(error) => return Poll::Ready(Err(errno_to_io(error))),
             }
-            self.write_buf.clear();
         }
         Poll::Ready(Ok(()))
     }
@@ -333,12 +748,12 @@ impl AsyncWrite for BlockingUnixTransport {
 }
 
 pub fn to_toolkit_shell_name(name: &FriendlyName) -> ShellName {
-    ShellName::new(name.as_str().to_string())
+    ShellName::new(name.as_str().to_string()).expect("validated friendly name is a toolkit shell")
 }
 
-pub fn kill_shell_op(vm: &VmId, name: &FriendlyName) -> ShellOp {
+pub fn kill_shell_op(target: &TargetId, name: &FriendlyName) -> ShellOp {
     ShellOp::Kill(d2b_toolkit_core::ShellKillArgs {
-        vm: vm.as_str().to_string(),
+        vm: target.as_str().to_string(),
         name: to_toolkit_shell_name(name),
     })
 }
@@ -419,6 +834,7 @@ pub enum D2bClientErrorKind {
     AuthDenied,
     StaleSession,
     Timeout,
+    FeatureUnavailable(KnownFeatureFlag),
     Typed(String),
     Protocol(&'static str),
 }
@@ -430,6 +846,7 @@ impl D2bClientErrorKind {
             Self::AuthDenied => "auth-denied",
             Self::StaleSession => "stale-session",
             Self::Timeout => "timeout",
+            Self::FeatureUnavailable(_) => "feature-unavailable",
             Self::Typed(kind) => kind.as_str(),
             Self::Protocol(kind) => kind,
         }
@@ -464,6 +881,15 @@ impl D2bClientError {
         }
     }
 
+    fn timeout(action: &'static str, trace: ActionTrace) -> Self {
+        Self {
+            action,
+            kind: D2bClientErrorKind::Timeout,
+            trace,
+            source: None,
+        }
+    }
+
     pub fn action(&self) -> &'static str {
         self.action
     }
@@ -483,6 +909,11 @@ impl D2bClientError {
     pub fn metrics_label_value(&self) -> &str {
         self.kind.metrics_label_value()
     }
+
+    pub fn remediation(&self) -> Option<&'static str> {
+        matches!(self.kind, D2bClientErrorKind::FeatureUnavailable(_))
+            .then_some("update d2b, d2bd, d2b-toolkit, and d2b-unsafe-local-helper together")
+    }
 }
 
 impl fmt::Display for D2bClientError {
@@ -493,7 +924,11 @@ impl fmt::Display for D2bClientError {
             action = self.action,
             kind = self.kind.metrics_label_value(),
             trace = self.trace,
-        )
+        )?;
+        if let Some(remediation) = self.remediation() {
+            write!(f, "; remediation: {remediation}")?;
+        }
+        Ok(())
     }
 }
 
@@ -509,6 +944,9 @@ fn classify_client_error(error: &ClientError) -> D2bClientErrorKind {
     match error {
         ClientError::Daemon { kind } => classify_typed_error(kind),
         ClientError::Core(ToolkitError::PrivilegedBrokerRefused) => D2bClientErrorKind::AuthDenied,
+        ClientError::Core(ToolkitError::FeatureUnavailable { feature }) => {
+            D2bClientErrorKind::FeatureUnavailable(*feature)
+        }
         ClientError::Core(ToolkitError::Io { source, .. }) => match source.kind() {
             std::io::ErrorKind::PermissionDenied => D2bClientErrorKind::AuthDenied,
             std::io::ErrorKind::ConnectionRefused
@@ -526,6 +964,14 @@ fn classify_client_error(error: &ClientError) -> D2bClientErrorKind {
         ClientError::Core(ToolkitError::FrameTooLarge { .. }) => {
             D2bClientErrorKind::Protocol("frame-too-large")
         }
+        ClientError::Core(
+            ToolkitError::InvalidTarget { .. }
+            | ToolkitError::InvalidToken { .. }
+            | ToolkitError::InvalidIdentity { .. }
+            | ToolkitError::InconsistentWorkloadIdentity
+            | ToolkitError::LauncherItemUnavailable
+            | ToolkitError::AmbiguousLauncherItems { .. },
+        ) => D2bClientErrorKind::Protocol("invalid-public-contract"),
         ClientError::Codec { .. } => D2bClientErrorKind::Protocol("codec"),
         ClientError::Hello { .. } => D2bClientErrorKind::Protocol("hello"),
         ClientError::UnexpectedResponse { .. } => {
@@ -557,42 +1003,42 @@ pub enum D2bActionOutcome<T> {
     },
     FocusExisting {
         client: PublicSocketClient<T>,
-        vm: VmId,
+        target: TargetId,
         name: FriendlyName,
     },
     PromptAlreadyAttached {
         client: PublicSocketClient<T>,
-        vm: VmId,
+        target: TargetId,
         name: FriendlyName,
     },
     PromptStop {
         client: PublicSocketClient<T>,
-        vm: VmId,
+        target: TargetId,
         name: FriendlyName,
         requires_confirmation: bool,
     },
     Listed {
         client: PublicSocketClient<T>,
-        vm: VmId,
+        target: TargetId,
         sessions: Vec<ShellSession>,
     },
     Attached {
         attached: AttachedShell<T>,
-        vm: VmId,
+        target: TargetId,
         resolved_name: FriendlyName,
         force: bool,
         trace: ActionTrace,
     },
     Killed {
         client: PublicSocketClient<T>,
-        vm: VmId,
+        target: TargetId,
         name: FriendlyName,
         result: ShellKillResult,
         trace: ActionTrace,
     },
     Detached {
         client: PublicSocketClient<T>,
-        vm: VmId,
+        target: TargetId,
         name: FriendlyName,
         result: d2b_toolkit_core::ShellDetachResult,
         trace: ActionTrace,
@@ -606,55 +1052,66 @@ impl<T> fmt::Debug for D2bActionOutcome<T> {
             Self::Disabled { reason, .. } => {
                 f.debug_struct("Disabled").field("reason", reason).finish()
             }
-            Self::FocusExisting { vm, .. } => f
+            Self::FocusExisting { target, .. } => f
                 .debug_struct("FocusExisting")
-                .field("vm", vm)
+                .field("target", target)
                 .field("name", &"<redacted>")
                 .finish(),
-            Self::PromptAlreadyAttached { vm, .. } => f
+            Self::PromptAlreadyAttached { target, .. } => f
                 .debug_struct("PromptAlreadyAttached")
-                .field("vm", vm)
+                .field("target", target)
                 .field("name", &"<redacted>")
                 .finish(),
             Self::PromptStop {
-                vm,
+                target,
                 requires_confirmation,
                 ..
             } => f
                 .debug_struct("PromptStop")
-                .field("vm", vm)
+                .field("target", target)
                 .field("name", &"<redacted>")
                 .field("requires_confirmation", requires_confirmation)
                 .finish(),
-            Self::Listed { vm, sessions, .. } => f
+            Self::Listed {
+                target, sessions, ..
+            } => f
                 .debug_struct("Listed")
-                .field("vm", vm)
+                .field("target", target)
                 .field("sessions_len", &sessions.len())
                 .finish(),
             Self::Attached {
-                vm, force, trace, ..
+                target,
+                force,
+                trace,
+                ..
             } => f
                 .debug_struct("Attached")
-                .field("vm", vm)
+                .field("target", target)
                 .field("resolved_name", &"<redacted>")
                 .field("force", force)
                 .field("trace", trace)
                 .finish(),
             Self::Killed {
-                vm, result, trace, ..
+                target,
+                result,
+                trace,
+                ..
             } => f
                 .debug_struct("Killed")
-                .field("vm", vm)
+                .field("target", target)
                 .field("name", &"<redacted>")
                 .field("killed", &result.killed)
                 .field("state", &result.state)
                 .field("trace", trace)
                 .finish(),
             Self::Detached {
-                vm, result, trace, ..
+                target,
+                result,
+                trace,
+                ..
             } => f
                 .debug_struct("Detached")
-                .field("vm", vm)
+                .field("target", target)
                 .field("name", &"<redacted>")
                 .field("detached", &result.detached)
                 .field("trace", trace)
@@ -667,8 +1124,8 @@ impl<T> fmt::Debug for D2bActionOutcome<T> {
 mod tests {
     use super::*;
     use d2b_toolkit_core::{
-        ErrorEnvelope, OpaqueHandle, PublicResponse, ShellAttachResult, ShellListEntry,
-        ShellOpResponse,
+        ErrorEnvelope, NegotiatedCapabilities, OpaqueHandle, PublicResponse, ShellAttachResult,
+        ShellListEntry, ShellOpResponse, WorkloadOpResponse,
     };
     use futures::executor::block_on;
     use futures::io::{AsyncRead, AsyncWrite};
@@ -761,8 +1218,22 @@ mod tests {
         FriendlyName::from_candidate(name).unwrap()
     }
 
-    fn vm(name: &str) -> VmId {
-        VmId::new(name).unwrap()
+    fn target_id(name: &str) -> TargetId {
+        TargetId::new(name).unwrap()
+    }
+
+    fn target(name: &str) -> ShellTarget {
+        ShellTarget {
+            id: target_id(name),
+            provider_kind: ProviderKind::LocalVm,
+        }
+    }
+
+    fn unsafe_target(name: &str) -> ShellTarget {
+        ShellTarget {
+            id: target_id(name),
+            provider_kind: ProviderKind::UnsafeLocal,
+        }
     }
 
     fn boundary() -> D2bActionBoundary {
@@ -773,9 +1244,9 @@ mod tests {
         PublicResponse::Shell {
             op_id: Some(op_id),
             response: ShellOpResponse::List(ShellListResult {
-                default_name: ShellName::new("quiet-otter"),
+                default_name: ShellName::new("quiet-otter").unwrap(),
                 sessions: vec![ShellListEntry {
-                    name: ShellName::new("quiet-otter"),
+                    name: ShellName::new("quiet-otter").unwrap(),
                     state: ShellSessionState::Detached,
                     attached: false,
                     is_default: true,
@@ -789,7 +1260,7 @@ mod tests {
             op_id: Some(op_id),
             response: ShellOpResponse::Attach(ShellAttachResult {
                 session: OpaqueHandle::new("opaque-session-handle"),
-                resolved_name: ShellName::new(name),
+                resolved_name: ShellName::new(name).unwrap(),
                 state: ShellSessionState::Attached,
                 force_evicted: false,
             }),
@@ -800,7 +1271,7 @@ mod tests {
         PublicResponse::Shell {
             op_id: Some(op_id),
             response: ShellOpResponse::Kill(ShellKillResult {
-                name: ShellName::new(name),
+                name: ShellName::new(name).unwrap(),
                 killed: true,
                 state: ShellSessionState::Killed,
             }),
@@ -819,13 +1290,123 @@ mod tests {
         }
     }
 
+    fn fixture_inventory(json: &str) -> WorkloadListResult {
+        match serde_json::from_str::<PublicResponse>(json).unwrap() {
+            PublicResponse::Workload {
+                response: WorkloadOpResponse::List(result),
+                ..
+            } => result,
+            other => panic!("unexpected fixture response: {other:?}"),
+        }
+    }
+
+    fn unsafe_shell_capabilities() -> NegotiatedCapabilities {
+        NegotiatedCapabilities::from_features([KnownFeatureFlag::UnsafeLocalShellV1.wire_value()])
+    }
+
+    #[test]
+    fn toolkit_v020_workload_fixtures_conform_and_filter_shell_items() {
+        let local = fixture_inventory(include_str!(
+            "../tests/fixtures/toolkit-v0.2.0/local-vm-list-response.json"
+        ));
+        let unsafe_local = fixture_inventory(include_str!(
+            "../tests/fixtures/toolkit-v0.2.0/unsafe-local-list-response.json"
+        ));
+        let first_class = fixture_inventory(include_str!(
+            "../tests/fixtures/toolkit-v0.2.0/first-class-local-vm-list-response.json"
+        ));
+
+        let local = shell_workloads_from_inventory(&local, true).unwrap();
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].target.as_str(), "corp-vm.work.d2b");
+        assert_eq!(local[0].legacy_vm_name.as_deref(), Some("corp-vm"));
+
+        let unsafe_local = shell_workloads_from_inventory(&unsafe_local, true).unwrap();
+        assert_eq!(unsafe_local.len(), 1);
+        assert_eq!(unsafe_local[0].provider_kind, ProviderKind::UnsafeLocal);
+        assert_eq!(
+            unsafe_local[0].shell_launcher_item.as_ref().unwrap().id,
+            "terminal"
+        );
+
+        assert!(
+            shell_workloads_from_inventory(&first_class, true)
+                .unwrap()
+                .is_empty(),
+            "configured-launch-only workloads are not terminal targets"
+        );
+    }
+
+    #[test]
+    fn unsafe_local_discovery_exposes_posture_and_typed_remediation() {
+        let inventory = fixture_inventory(include_str!(
+            "../tests/fixtures/toolkit-v0.2.0/unsafe-local-list-response.json"
+        ));
+
+        let skewed = shell_workloads_from_inventory(&inventory, false).unwrap();
+        let target = &skewed[0];
+        assert_eq!(target.target.as_str(), "tools.host.d2b");
+        assert_eq!(target.isolation_posture, IsolationPosture::UnsafeLocal);
+        assert_eq!(
+            target.session_persistence,
+            SessionPersistence::UserManagerLifetime
+        );
+        assert!(!target.shell_feature_available);
+        assert_eq!(
+            target.remediation().unwrap().kind,
+            wlterm_core::RemediationKind::UpdateD2b
+        );
+
+        let negotiated = shell_workloads_from_inventory(&inventory, true).unwrap();
+        assert_eq!(
+            negotiated[0].remediation().unwrap().kind,
+            wlterm_core::RemediationKind::RestartHelper
+        );
+    }
+
+    #[test]
+    fn first_class_local_vm_without_legacy_name_uses_canonical_target() {
+        let mut value: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/toolkit-v0.2.0/first-class-local-vm-list-response.json"
+        ))
+        .unwrap();
+        let workload = &mut value["result"]["workloads"][0];
+        workload["state"] = serde_json::json!("running");
+        workload["capabilities"] =
+            serde_json::json!(["configured-launch", "persistent-shell", "pty"]);
+        workload["launcherItems"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "terminal",
+                "name": "Terminal",
+                "icon": {"name": "terminal"},
+                "type": "shell",
+                "graphical": false,
+                "capabilities": ["persistent-shell", "pty"]
+            }));
+        let inventory = fixture_inventory(&serde_json::to_string(&value).unwrap());
+        let summaries = shell_workloads_from_inventory(&inventory, true).unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].target.as_str(), "builder.dev.d2b");
+        assert_eq!(summaries[0].id.as_str(), "builder");
+        assert!(summaries[0].legacy_vm_name.is_none());
+        assert!(summaries[0].actions_available());
+    }
+
     #[test]
     fn list_executes_public_socket_shell_list() {
         block_on(async {
             let client =
                 PublicSocketClient::new(FakePublicSocket::with_responses(vec![list_response(1)]));
             let outcome = boundary()
-                .execute_with_client(client, PlannedAction::ListSessions { vm: vm("work") })
+                .execute_with_client(
+                    client,
+                    PlannedAction::ListSessions {
+                        target: target("work"),
+                    },
+                )
                 .await
                 .unwrap();
             let D2bActionOutcome::Listed {
@@ -845,6 +1426,145 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_local_feature_skew_fails_before_writing_with_update_remediation() {
+        block_on(async {
+            let client = PublicSocketClient::with_negotiated_capabilities(
+                FakePublicSocket::default(),
+                NegotiatedCapabilities::default(),
+            );
+            let error = boundary()
+                .execute_with_client(
+                    client,
+                    PlannedAction::ListSessions {
+                        target: unsafe_target("tools.host.d2b"),
+                    },
+                )
+                .await
+                .unwrap_err();
+
+            assert_eq!(
+                error.kind(),
+                &D2bClientErrorKind::FeatureUnavailable(KnownFeatureFlag::UnsafeLocalShellV1)
+            );
+            assert!(error.remediation().unwrap().contains("update d2b"));
+            let source = error.source.as_ref().unwrap();
+            assert!(
+                matches!(
+                    source,
+                    ClientError::Core(ToolkitError::FeatureUnavailable {
+                        feature: KnownFeatureFlag::UnsafeLocalShellV1
+                    })
+                ),
+                "{source:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn canonical_target_dispatch_covers_list_create_open_detach_and_stop() {
+        block_on(async {
+            let canonical = "tools.host.d2b";
+
+            let client = PublicSocketClient::with_negotiated_capabilities(
+                FakePublicSocket::with_responses(vec![list_response(1)]),
+                unsafe_shell_capabilities(),
+            );
+            let listed = boundary()
+                .execute_with_client(
+                    client,
+                    PlannedAction::ListSessions {
+                        target: unsafe_target(canonical),
+                    },
+                )
+                .await
+                .unwrap();
+            let D2bActionOutcome::Listed { client, .. } = listed else {
+                panic!("expected list");
+            };
+            assert_eq!(
+                client.into_inner().written_json_frames()[0]["args"]["vm"],
+                canonical
+            );
+
+            for (name, force) in [("fresh-panda", false), ("quiet-otter", true)] {
+                let client = PublicSocketClient::with_negotiated_capabilities(
+                    FakePublicSocket::with_responses(vec![attach_response(1, name)]),
+                    unsafe_shell_capabilities(),
+                );
+                let attached = boundary()
+                    .execute_with_client(
+                        client,
+                        PlannedAction::AttachShell {
+                            target: unsafe_target(canonical),
+                            name: Some(shell(name)),
+                            force,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let D2bActionOutcome::Attached { attached, .. } = attached else {
+                    panic!("expected attach");
+                };
+                let frame = attached.into_inner().into_inner().written_json_frames();
+                assert_eq!(frame[0]["args"]["vm"], canonical);
+                assert_eq!(frame[0]["args"]["force"], force);
+            }
+
+            let detach_response = PublicResponse::Shell {
+                op_id: Some(1),
+                response: ShellOpResponse::Detach(d2b_toolkit_core::ShellDetachResult {
+                    resolved_name: ShellName::new("quiet-otter").unwrap(),
+                    detached: true,
+                    cause: None,
+                }),
+            };
+            let client = PublicSocketClient::with_negotiated_capabilities(
+                FakePublicSocket::with_responses(vec![detach_response]),
+                unsafe_shell_capabilities(),
+            );
+            let detached = boundary()
+                .execute_with_client(
+                    client,
+                    PlannedAction::DetachShell {
+                        target: unsafe_target(canonical),
+                        name: shell("quiet-otter"),
+                    },
+                )
+                .await
+                .unwrap();
+            let D2bActionOutcome::Detached { client, .. } = detached else {
+                panic!("expected detach");
+            };
+            assert_eq!(
+                client.into_inner().written_json_frames()[0]["args"]["vm"],
+                canonical
+            );
+
+            let client = PublicSocketClient::with_negotiated_capabilities(
+                FakePublicSocket::with_responses(vec![kill_response(1, "quiet-otter")]),
+                unsafe_shell_capabilities(),
+            );
+            let killed = boundary()
+                .execute_with_client(
+                    client,
+                    PlannedAction::KillShell {
+                        target: unsafe_target(canonical),
+                        name: shell("quiet-otter"),
+                    },
+                )
+                .await
+                .unwrap();
+            let D2bActionOutcome::Killed { client, .. } = killed else {
+                panic!("expected kill");
+            };
+            assert_eq!(
+                client.into_inner().written_json_frames()[0]["args"]["vm"],
+                canonical
+            );
+        });
+    }
+
+    #[test]
     fn open_executes_public_socket_attach() {
         block_on(async {
             let client =
@@ -856,7 +1576,7 @@ mod tests {
                 .execute_with_client(
                     client,
                     PlannedAction::AttachShell {
-                        vm: vm("work"),
+                        target: target("work"),
                         name: Some(shell("quiet-otter")),
                         force: true,
                     },
@@ -894,7 +1614,7 @@ mod tests {
                 .execute_with_client(
                     client,
                     PlannedAction::AttachShell {
-                        vm: vm("work"),
+                        target: target("work"),
                         name: Some(shell("fresh-panda")),
                         force: false,
                     },
@@ -918,7 +1638,7 @@ mod tests {
                 .execute_with_client(
                     client,
                     PlannedAction::PromptStop {
-                        vm: vm("work"),
+                        target: target("work"),
                         name: shell("quiet-otter"),
                     },
                 )
@@ -944,7 +1664,7 @@ mod tests {
                 .execute_with_client(
                     client,
                     PlannedAction::KillShell {
-                        vm: vm("work"),
+                        target: target("work"),
                         name: shell("quiet-otter"),
                     },
                 )
@@ -967,7 +1687,7 @@ mod tests {
                 PublicResponse::Shell {
                     op_id: Some(2),
                     response: ShellOpResponse::CloseAttach(d2b_toolkit_core::ShellDetachResult {
-                        resolved_name: ShellName::new("quiet-otter"),
+                        resolved_name: ShellName::new("quiet-otter").unwrap(),
                         detached: true,
                         cause: None,
                     }),
@@ -978,7 +1698,7 @@ mod tests {
                 .execute_with_client(
                     client,
                     PlannedAction::AttachShell {
-                        vm: vm("work"),
+                        target: target("work"),
                         name: Some(shell("quiet-otter")),
                         force: false,
                     },
@@ -1023,7 +1743,12 @@ mod tests {
         block_on(async {
             let client = PublicSocketClient::new(FakePublicSocket::default());
             let err = boundary()
-                .execute_with_client(client, PlannedAction::ListSessions { vm: vm("work") })
+                .execute_with_client(
+                    client,
+                    PlannedAction::ListSessions {
+                        target: target("work"),
+                    },
+                )
                 .await
                 .unwrap_err();
             assert_eq!(err.kind(), &D2bClientErrorKind::DaemonDown);
@@ -1054,7 +1779,12 @@ mod tests {
                         1, typed,
                     )]));
                 let err = boundary()
-                    .execute_with_client(client, PlannedAction::ListSessions { vm: vm("work") })
+                    .execute_with_client(
+                        client,
+                        PlannedAction::ListSessions {
+                            target: target("work"),
+                        },
+                    )
                     .await
                     .unwrap_err();
                 assert_eq!(err.kind(), &expected);
@@ -1095,8 +1825,27 @@ mod tests {
     }
 
     #[test]
+    fn operation_timeout_bounds_a_stalled_async_transport() {
+        let boundary = D2bActionBoundary::new(D2bClientConfig {
+            operation_timeout_ms: 20,
+            ..D2bClientConfig::default()
+        });
+        let started = std::time::Instant::now();
+        let result = boundary.block_on_operation(
+            "test",
+            ActionTrace::for_label("timeout-test"),
+            futures::future::pending::<Result<(), D2bClientError>>(),
+        );
+        assert!(matches!(
+            result.unwrap_err().kind(),
+            D2bClientErrorKind::Timeout
+        ));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
     fn shell_name_does_not_become_metric_label() {
-        let op = kill_shell_op(&vm("work"), &shell("customer-project-shell"));
+        let op = kill_shell_op(&target_id("work"), &shell("customer-project-shell"));
 
         assert_eq!(op.metrics_label_value(), "kill");
         if let ShellOp::Kill(args) = op {

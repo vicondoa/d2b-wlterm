@@ -142,27 +142,39 @@ impl fmt::Debug for SafeCorrelation {
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct VmId(String);
+pub struct TargetId(String);
 
-impl VmId {
+impl TargetId {
     pub fn new(value: impl Into<String>) -> Result<Self, ModelError> {
         let value = value.into();
         if value.trim().is_empty() {
-            return Err(ModelError::EmptyVmId);
+            return Err(ModelError::EmptyTargetId);
         }
+        d2b_toolkit_core::workload::validate_shell_target(&value)
+            .map_err(|_| ModelError::InvalidTargetId)?;
         Ok(Self(value))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
     }
-}
 
-impl fmt::Debug for VmId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("VmId").field(&self.0).finish()
+    pub fn is_canonical(&self) -> bool {
+        d2b_toolkit_core::WorkloadTarget::parse(&self.0).is_ok()
     }
 }
+
+impl fmt::Debug for TargetId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("TargetId").field(&"<redacted>").finish()
+    }
+}
+
+/// Source-compatible alias for callers that still construct local VM ids.
+///
+/// New code should use `TargetId`; discovered workloads always use their
+/// canonical target, including first-class local VMs and unsafe-local providers.
+pub type VmId = TargetId;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -188,18 +200,183 @@ impl SessionId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum VmPowerState {
+pub enum TargetPowerState {
     Online,
     Offline,
+    #[default]
     Unknown,
 }
 
-impl VmPowerState {
+impl TargetPowerState {
     pub const fn is_online(self) -> bool {
         matches!(self, Self::Online)
     }
+}
+
+pub type VmPowerState = TargetPowerState;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderKind {
+    #[default]
+    LocalVm,
+    QemuMedia,
+    ProviderManaged,
+    UnsafeLocal,
+}
+
+impl ProviderKind {
+    pub const fn metrics_label_value(self) -> &'static str {
+        match self {
+            Self::LocalVm => "local-vm",
+            Self::QemuMedia => "qemu-media",
+            Self::ProviderManaged => "provider-managed",
+            Self::UnsafeLocal => "unsafe-local",
+        }
+    }
+
+    pub const fn is_unsafe_local(self) -> bool {
+        matches!(self, Self::UnsafeLocal)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IsolationPosture {
+    #[default]
+    VirtualMachine,
+    ProviderManaged,
+    UnsafeLocal,
+}
+
+impl IsolationPosture {
+    pub const fn metrics_label_value(self) -> &'static str {
+        match self {
+            Self::VirtualMachine => "virtual-machine",
+            Self::ProviderManaged => "provider-managed",
+            Self::UnsafeLocal => "unsafe-local",
+        }
+    }
+
+    pub const fn warning(self) -> Option<&'static str> {
+        match self {
+            Self::UnsafeLocal => Some("No isolation: runs in the host user session"),
+            Self::VirtualMachine | Self::ProviderManaged => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionPersistence {
+    #[default]
+    RuntimeManaged,
+    UserManagerLifetime,
+}
+
+impl SessionPersistence {
+    pub const fn metrics_label_value(self) -> &'static str {
+        match self {
+            Self::RuntimeManaged => "runtime-managed",
+            Self::UserManagerLifetime => "user-manager-lifetime",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TargetAvailability {
+    #[default]
+    Ready,
+    HelperUnavailable,
+    HelperStale,
+    UserManagerUnavailable,
+    GraphicalSessionInactive,
+    WaylandUnavailable,
+    ProxyUnavailable,
+    Degraded,
+}
+
+impl TargetAvailability {
+    pub const fn metrics_label_value(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::HelperUnavailable => "helper-unavailable",
+            Self::HelperStale => "helper-stale",
+            Self::UserManagerUnavailable => "user-manager-unavailable",
+            Self::GraphicalSessionInactive => "graphical-session-inactive",
+            Self::WaylandUnavailable => "wayland-unavailable",
+            Self::ProxyUnavailable => "proxy-unavailable",
+            Self::Degraded => "degraded",
+        }
+    }
+
+    pub const fn is_ready(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    pub const fn remediation(self) -> Option<TargetRemediation> {
+        let (kind, message) = match self {
+            Self::Ready => return None,
+            Self::HelperUnavailable | Self::HelperStale => (
+                RemediationKind::RestartHelper,
+                "Restart d2b-unsafe-local-helper.service in the user session",
+            ),
+            Self::UserManagerUnavailable => (
+                RemediationKind::StartUserManager,
+                "Sign in through a PAM-backed graphical session",
+            ),
+            Self::GraphicalSessionInactive => (
+                RemediationKind::StartGraphicalSession,
+                "Start an active graphical user session",
+            ),
+            Self::WaylandUnavailable => (
+                RemediationKind::RestoreWayland,
+                "Restore the Wayland user session",
+            ),
+            Self::ProxyUnavailable => (
+                RemediationKind::RepairProxy,
+                "Repair d2b-wayland-proxy; direct compositor fallback is disabled",
+            ),
+            Self::Degraded => (
+                RemediationKind::Retry,
+                "Review d2b provider status and retry",
+            ),
+        };
+        Some(TargetRemediation { kind, message })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RemediationKind {
+    UpdateD2b,
+    RestartHelper,
+    StartUserManager,
+    StartGraphicalSession,
+    RestoreWayland,
+    RepairProxy,
+    Retry,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetRemediation {
+    pub kind: RemediationKind,
+    pub message: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ShellLauncherItem {
+    pub id: String,
+    pub name: String,
+}
+
+fn default_shell_feature_available() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,37 +438,153 @@ impl ShellSession {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct VmSummary {
+pub struct WorkloadSummary {
+    pub target: TargetId,
+    /// Legacy flat-card identifier retained for 0.1 JSON consumers.
     pub id: VmId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_vm_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_name: Option<String>,
+    #[serde(default)]
+    pub provider_kind: ProviderKind,
+    #[serde(default)]
+    pub isolation_posture: IsolationPosture,
+    #[serde(default)]
+    pub session_persistence: SessionPersistence,
+    #[serde(default)]
+    pub availability: TargetAvailability,
+    #[serde(default = "default_shell_feature_available")]
+    pub shell_feature_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_launcher_item: Option<ShellLauncherItem>,
     pub power_state: VmPowerState,
     #[serde(default)]
     pub sessions: Vec<ShellSession>,
 }
 
-impl VmSummary {
-    pub fn new(id: VmId, power_state: VmPowerState) -> Self {
-        Self {
+impl<'de> Deserialize<'de> for WorkloadSummary {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Wire {
+            #[serde(default)]
+            target: Option<TargetId>,
+            #[serde(default)]
+            id: Option<VmId>,
+            #[serde(default)]
+            canonical_target: Option<String>,
+            #[serde(default)]
+            legacy_vm_name: Option<String>,
+            #[serde(default)]
+            workload_name: Option<String>,
+            #[serde(default)]
+            provider_kind: ProviderKind,
+            #[serde(default)]
+            isolation_posture: IsolationPosture,
+            #[serde(default)]
+            session_persistence: SessionPersistence,
+            #[serde(default)]
+            availability: TargetAvailability,
+            #[serde(default = "default_shell_feature_available")]
+            shell_feature_available: bool,
+            #[serde(default)]
+            shell_launcher_item: Option<ShellLauncherItem>,
+            #[serde(default)]
+            power_state: VmPowerState,
+            #[serde(default)]
+            sessions: Vec<ShellSession>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let canonical = wire
+            .canonical_target
+            .as_deref()
+            .map(TargetId::new)
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+        let target = wire
+            .target
+            .or(canonical)
+            .or_else(|| wire.id.clone())
+            .ok_or_else(|| serde::de::Error::custom("workload target is required"))?;
+        let id = wire.id.unwrap_or_else(|| {
+            wire.legacy_vm_name
+                .as_deref()
+                .and_then(|legacy| TargetId::new(legacy).ok())
+                .unwrap_or_else(|| target.clone())
+        });
+        let legacy_vm_name = wire
+            .legacy_vm_name
+            .or_else(|| (id != target && !id.is_canonical()).then(|| id.as_str().to_string()));
+        let canonical_target = target.is_canonical().then(|| target.as_str().to_string());
+
+        Ok(Self {
+            target,
             id,
-            canonical_target: None,
+            canonical_target,
+            legacy_vm_name,
+            workload_name: wire.workload_name,
+            provider_kind: wire.provider_kind,
+            isolation_posture: wire.isolation_posture,
+            session_persistence: wire.session_persistence,
+            availability: wire.availability,
+            shell_feature_available: wire.shell_feature_available,
+            shell_launcher_item: wire.shell_launcher_item,
+            power_state: wire.power_state,
+            sessions: wire.sessions,
+        })
+    }
+}
+
+impl WorkloadSummary {
+    pub fn new(target: TargetId, power_state: VmPowerState) -> Self {
+        let canonical_target = target.is_canonical().then(|| target.as_str().to_string());
+        Self {
+            id: target.clone(),
+            target,
+            canonical_target,
+            legacy_vm_name: None,
+            workload_name: None,
+            provider_kind: ProviderKind::LocalVm,
+            isolation_posture: IsolationPosture::VirtualMachine,
+            session_persistence: SessionPersistence::RuntimeManaged,
+            availability: TargetAvailability::Ready,
+            shell_feature_available: true,
+            shell_launcher_item: None,
             power_state,
             sessions: Vec::new(),
         }
     }
 
-    pub fn visual_state(&self) -> VmVisualState {
-        if self.power_state.is_online() {
-            VmVisualState {
+    pub fn discovered(
+        target: TargetId,
+        compatibility_id: TargetId,
+        power_state: VmPowerState,
+    ) -> Self {
+        let mut summary = Self::new(target.clone(), power_state);
+        summary.id = compatibility_id;
+        summary.canonical_target = Some(target.as_str().to_string());
+        summary
+    }
+
+    pub fn visual_state(&self) -> TargetVisualState {
+        if self.actions_available() {
+            TargetVisualState {
                 power_state: self.power_state,
                 can_list_sessions: true,
                 can_create_session: true,
                 can_open_session: true,
             }
         } else {
-            VmVisualState {
+            TargetVisualState {
                 power_state: self.power_state,
                 can_list_sessions: false,
                 can_create_session: false,
@@ -305,7 +598,27 @@ impl VmSummary {
             .iter()
             .find(|session| session.name.as_str() == name.as_str())
     }
+
+    pub const fn actions_available(&self) -> bool {
+        self.power_state.is_online() && self.availability.is_ready() && self.shell_feature_available
+    }
+
+    pub const fn requires_unsafe_local_shell(&self) -> bool {
+        self.provider_kind.is_unsafe_local()
+    }
+
+    pub const fn remediation(&self) -> Option<TargetRemediation> {
+        if !self.shell_feature_available {
+            return Some(TargetRemediation {
+                kind: RemediationKind::UpdateD2b,
+                message: "Update d2b, d2bd, and d2b-unsafe-local-helper together",
+            });
+        }
+        self.availability.remediation()
+    }
 }
+
+pub type VmSummary = WorkloadSummary;
 
 /// Extract the realm segment from a canonical workload target of the form
 /// `<workload>.<realm>[...].d2b`.
@@ -329,26 +642,30 @@ pub fn realm_from_canonical_target(target: &str) -> Option<&str> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VmVisualState {
+pub struct TargetVisualState {
     pub power_state: VmPowerState,
     pub can_list_sessions: bool,
     pub can_create_session: bool,
     pub can_open_session: bool,
 }
 
+pub type VmVisualState = TargetVisualState;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Model {
     config: Config,
-    vms: BTreeMap<VmId, VmSummary>,
+    workloads: BTreeMap<TargetId, WorkloadSummary>,
     async_errors: Vec<AsyncErrorEvent>,
+    global_remediation: Option<TargetRemediation>,
 }
 
 impl Model {
     pub fn new(config: Config) -> Self {
         Self {
             config,
-            vms: BTreeMap::new(),
+            workloads: BTreeMap::new(),
             async_errors: Vec::new(),
+            global_remediation: None,
         }
     }
 
@@ -356,31 +673,63 @@ impl Model {
         &self.config
     }
 
+    pub fn workloads(&self) -> impl Iterator<Item = &WorkloadSummary> {
+        self.workloads.values()
+    }
+
+    pub fn target(&self, target: &TargetId) -> Option<&WorkloadSummary> {
+        self.workloads.get(target).or_else(|| {
+            self.workloads.values().find(|summary| {
+                summary.id == *target
+                    || summary
+                        .legacy_vm_name
+                        .as_deref()
+                        .is_some_and(|legacy| legacy == target.as_str())
+            })
+        })
+    }
+
     pub fn vms(&self) -> impl Iterator<Item = &VmSummary> {
-        self.vms.values()
+        self.workloads()
     }
 
     pub fn vm(&self, vm: &VmId) -> Option<&VmSummary> {
-        self.vms.get(vm)
+        self.target(vm)
     }
 
     pub fn async_errors(&self) -> &[AsyncErrorEvent] {
         &self.async_errors
     }
 
+    pub const fn global_remediation(&self) -> Option<TargetRemediation> {
+        self.global_remediation
+    }
+
     pub fn apply(&mut self, event: ModelEvent) {
         match event {
+            ModelEvent::WorkloadSnapshot { workloads } => {
+                self.workloads = workloads
+                    .into_iter()
+                    .map(|workload| (workload.target.clone(), workload))
+                    .collect();
+            }
+            ModelEvent::WorkloadChanged { workload } => {
+                self.workloads.insert(workload.target.clone(), workload);
+            }
             ModelEvent::VmSnapshot { vms } => {
-                self.vms = vms.into_iter().map(|vm| (vm.id.clone(), vm)).collect();
+                self.apply(ModelEvent::WorkloadSnapshot { workloads: vms });
             }
             ModelEvent::VmChanged { vm } => {
-                self.vms.insert(vm.id.clone(), vm);
+                self.apply(ModelEvent::WorkloadChanged { workload: vm });
             }
             ModelEvent::AsyncError { message } => {
                 self.async_errors.push(AsyncErrorEvent::new(
                     message,
                     self.config.ui.async_error_display,
                 ));
+            }
+            ModelEvent::GlobalRemediation { remediation } => {
+                self.global_remediation = Some(remediation);
             }
             ModelEvent::DismissAsyncError { index } => {
                 if index < self.async_errors.len() {
@@ -392,131 +741,198 @@ impl Model {
 
     pub fn plan(&self, intent: UserIntent) -> PlannedAction {
         match intent {
-            UserIntent::RefreshVms => PlannedAction::RefreshVms,
-            UserIntent::ListSessions { vm } => {
-                if self.vm_is_online(&vm) {
-                    PlannedAction::ListSessions { vm }
-                } else {
-                    PlannedAction::Disabled {
-                        reason: DisabledReason::VmOffline,
-                    }
-                }
+            UserIntent::RefreshTargets => PlannedAction::RefreshTargets,
+            UserIntent::ListSessions { target } => {
+                self.plan_available(target, |target| PlannedAction::ListSessions { target })
             }
-            UserIntent::CreateSession { vm, name } => {
-                if self.vm_is_online(&vm) {
-                    PlannedAction::AttachShell {
-                        vm,
-                        name: Some(name),
-                        force: false,
-                    }
-                } else {
-                    PlannedAction::Disabled {
-                        reason: DisabledReason::VmOffline,
-                    }
-                }
+            UserIntent::CreateSession { target, name } => {
+                self.plan_available(target, |target| PlannedAction::AttachShell {
+                    target,
+                    name: Some(name),
+                    force: false,
+                })
             }
-            UserIntent::OpenSession { vm, name } => self.plan_open(vm, name),
+            UserIntent::OpenSession { target, name } => self.plan_open(target, name),
             UserIntent::StopShell {
-                vm,
+                target,
                 name,
                 confirmed,
             } => {
+                let Some(summary) = self.target(&target) else {
+                    return PlannedAction::Disabled {
+                        reason: DisabledReason::TargetUnknown,
+                    };
+                };
+                let Some(endpoint) = self.available_shell_target(summary) else {
+                    return PlannedAction::Disabled {
+                        reason: disabled_reason(summary),
+                    };
+                };
                 if self.config.ui.stop_confirmation && !confirmed {
-                    PlannedAction::PromptStop { vm, name }
+                    PlannedAction::PromptStop {
+                        target: endpoint,
+                        name,
+                    }
                 } else {
-                    PlannedAction::KillShell { vm, name }
+                    PlannedAction::KillShell {
+                        target: endpoint,
+                        name,
+                    }
                 }
             }
-            UserIntent::DetachShell { vm, name } => PlannedAction::DetachShell { vm, name },
-            UserIntent::ForceOpenSession { vm, name } => {
-                if self.vm_is_online(&vm) {
-                    PlannedAction::AttachShell {
-                        vm,
-                        name: Some(name),
-                        force: true,
-                    }
-                } else {
-                    PlannedAction::Disabled {
-                        reason: DisabledReason::VmOffline,
-                    }
-                }
+            UserIntent::DetachShell { target, name } => {
+                self.plan_available(target, |target| PlannedAction::DetachShell { target, name })
+            }
+            UserIntent::ForceOpenSession { target, name } => {
+                self.plan_available(target, |target| PlannedAction::AttachShell {
+                    target,
+                    name: Some(name),
+                    force: true,
+                })
             }
         }
     }
 
-    fn plan_open(&self, vm: VmId, name: FriendlyName) -> PlannedAction {
-        let Some(summary) = self.vm(&vm) else {
+    fn plan_open(&self, target: TargetId, name: FriendlyName) -> PlannedAction {
+        let Some(summary) = self.target(&target) else {
             return PlannedAction::Disabled {
-                reason: DisabledReason::VmUnknown,
+                reason: DisabledReason::TargetUnknown,
             };
         };
-        if !summary.power_state.is_online() {
+        let Some(endpoint) = self.available_shell_target(summary) else {
             return PlannedAction::Disabled {
-                reason: DisabledReason::VmOffline,
+                reason: disabled_reason(summary),
             };
-        }
+        };
 
         if summary
             .session(&name)
             .is_some_and(ShellSession::is_attached)
         {
             match self.config.ui.default_open_behavior {
-                OpenBehavior::FocusExisting => PlannedAction::FocusExistingShell { vm, name },
-                OpenBehavior::Prompt => PlannedAction::PromptAlreadyAttached { vm, name },
+                OpenBehavior::FocusExisting => PlannedAction::FocusExistingShell {
+                    target: endpoint,
+                    name,
+                },
+                OpenBehavior::Prompt => PlannedAction::PromptAlreadyAttached {
+                    target: endpoint,
+                    name,
+                },
                 OpenBehavior::ForceOpen => PlannedAction::AttachShell {
-                    vm,
+                    target: endpoint,
                     name: Some(name),
                     force: true,
                 },
             }
         } else {
             PlannedAction::AttachShell {
-                vm,
+                target: endpoint,
                 name: Some(name),
                 force: false,
             }
         }
     }
 
-    fn vm_is_online(&self, vm: &VmId) -> bool {
-        self.vm(vm)
-            .is_some_and(|summary| summary.power_state.is_online())
+    fn plan_available(
+        &self,
+        target: TargetId,
+        action: impl FnOnce(ShellTarget) -> PlannedAction,
+    ) -> PlannedAction {
+        let Some(summary) = self.target(&target) else {
+            return PlannedAction::Disabled {
+                reason: DisabledReason::TargetUnknown,
+            };
+        };
+        match self.available_shell_target(summary) {
+            Some(target) => action(target),
+            None => PlannedAction::Disabled {
+                reason: disabled_reason(summary),
+            },
+        }
+    }
+
+    fn available_shell_target(&self, summary: &WorkloadSummary) -> Option<ShellTarget> {
+        summary.actions_available().then(|| summary.shell_target())
+    }
+}
+
+fn disabled_reason(summary: &WorkloadSummary) -> DisabledReason {
+    if !summary.shell_feature_available {
+        DisabledReason::UpdateRequired
+    } else if !summary.availability.is_ready() {
+        DisabledReason::ProviderUnavailable
+    } else {
+        DisabledReason::TargetOffline
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShellTarget {
+    pub id: TargetId,
+    pub provider_kind: ProviderKind,
+}
+
+impl WorkloadSummary {
+    pub fn shell_target(&self) -> ShellTarget {
+        ShellTarget {
+            id: self.target.clone(),
+            provider_kind: self.provider_kind,
+        }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModelEvent {
-    VmSnapshot { vms: Vec<VmSummary> },
-    VmChanged { vm: VmSummary },
-    AsyncError { message: String },
-    DismissAsyncError { index: usize },
+    WorkloadSnapshot {
+        workloads: Vec<WorkloadSummary>,
+    },
+    WorkloadChanged {
+        workload: WorkloadSummary,
+    },
+    /// Compatibility event accepted from 0.1 frontends.
+    VmSnapshot {
+        vms: Vec<VmSummary>,
+    },
+    /// Compatibility event accepted from 0.1 frontends.
+    VmChanged {
+        vm: VmSummary,
+    },
+    AsyncError {
+        message: String,
+    },
+    GlobalRemediation {
+        remediation: TargetRemediation,
+    },
+    DismissAsyncError {
+        index: usize,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum UserIntent {
-    RefreshVms,
+    RefreshTargets,
     ListSessions {
-        vm: VmId,
+        target: TargetId,
     },
     CreateSession {
-        vm: VmId,
+        target: TargetId,
         name: FriendlyName,
     },
     OpenSession {
-        vm: VmId,
+        target: TargetId,
         name: FriendlyName,
     },
     ForceOpenSession {
-        vm: VmId,
+        target: TargetId,
         name: FriendlyName,
     },
     StopShell {
-        vm: VmId,
+        target: TargetId,
         name: FriendlyName,
         confirmed: bool,
     },
     DetachShell {
-        vm: VmId,
+        target: TargetId,
         name: FriendlyName,
     },
 }
@@ -524,32 +940,37 @@ pub enum UserIntent {
 impl fmt::Debug for UserIntent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::RefreshVms => f.write_str("RefreshVms"),
-            Self::ListSessions { vm } => f.debug_struct("ListSessions").field("vm", vm).finish(),
-            Self::CreateSession { vm, .. } => f
+            Self::RefreshTargets => f.write_str("RefreshTargets"),
+            Self::ListSessions { target } => f
+                .debug_struct("ListSessions")
+                .field("target", target)
+                .finish(),
+            Self::CreateSession { target, .. } => f
                 .debug_struct("CreateSession")
-                .field("vm", vm)
+                .field("target", target)
                 .field("name", &"<redacted>")
                 .finish(),
-            Self::OpenSession { vm, .. } => f
+            Self::OpenSession { target, .. } => f
                 .debug_struct("OpenSession")
-                .field("vm", vm)
+                .field("target", target)
                 .field("name", &"<redacted>")
                 .finish(),
-            Self::ForceOpenSession { vm, .. } => f
+            Self::ForceOpenSession { target, .. } => f
                 .debug_struct("ForceOpenSession")
-                .field("vm", vm)
+                .field("target", target)
                 .field("name", &"<redacted>")
                 .finish(),
-            Self::StopShell { vm, confirmed, .. } => f
+            Self::StopShell {
+                target, confirmed, ..
+            } => f
                 .debug_struct("StopShell")
-                .field("vm", vm)
+                .field("target", target)
                 .field("name", &"<redacted>")
                 .field("confirmed", confirmed)
                 .finish(),
-            Self::DetachShell { vm, .. } => f
+            Self::DetachShell { target, .. } => f
                 .debug_struct("DetachShell")
-                .field("vm", vm)
+                .field("target", target)
                 .field("name", &"<redacted>")
                 .finish(),
         }
@@ -558,33 +979,33 @@ impl fmt::Debug for UserIntent {
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum PlannedAction {
-    RefreshVms,
+    RefreshTargets,
     ListSessions {
-        vm: VmId,
+        target: ShellTarget,
     },
     AttachShell {
-        vm: VmId,
+        target: ShellTarget,
         name: Option<FriendlyName>,
         force: bool,
     },
     FocusExistingShell {
-        vm: VmId,
+        target: ShellTarget,
         name: FriendlyName,
     },
     PromptAlreadyAttached {
-        vm: VmId,
+        target: ShellTarget,
         name: FriendlyName,
     },
     PromptStop {
-        vm: VmId,
+        target: ShellTarget,
         name: FriendlyName,
     },
     KillShell {
-        vm: VmId,
+        target: ShellTarget,
         name: FriendlyName,
     },
     DetachShell {
-        vm: VmId,
+        target: ShellTarget,
         name: FriendlyName,
     },
     Disabled {
@@ -595,7 +1016,7 @@ pub enum PlannedAction {
 impl PlannedAction {
     pub const fn metrics_label_value(&self) -> &'static str {
         match self {
-            Self::RefreshVms => "refresh-vms",
+            Self::RefreshTargets => "refresh-targets",
             Self::ListSessions { .. } => "list-sessions",
             Self::AttachShell { force, .. } if *force => "attach-shell-force",
             Self::AttachShell { .. } => "attach-shell",
@@ -612,37 +1033,44 @@ impl PlannedAction {
 impl fmt::Debug for PlannedAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::RefreshVms => f.write_str("RefreshVms"),
-            Self::ListSessions { vm } => f.debug_struct("ListSessions").field("vm", vm).finish(),
-            Self::AttachShell { vm, name, force } => f
+            Self::RefreshTargets => f.write_str("RefreshTargets"),
+            Self::ListSessions { target } => f
+                .debug_struct("ListSessions")
+                .field("target", target)
+                .finish(),
+            Self::AttachShell {
+                target,
+                name,
+                force,
+            } => f
                 .debug_struct("AttachShell")
-                .field("vm", vm)
+                .field("target", target)
                 .field("has_name", &name.is_some())
                 .field("force", force)
                 .finish(),
-            Self::FocusExistingShell { vm, .. } => f
+            Self::FocusExistingShell { target, .. } => f
                 .debug_struct("FocusExistingShell")
-                .field("vm", vm)
+                .field("target", target)
                 .field("name", &"<redacted>")
                 .finish(),
-            Self::PromptAlreadyAttached { vm, .. } => f
+            Self::PromptAlreadyAttached { target, .. } => f
                 .debug_struct("PromptAlreadyAttached")
-                .field("vm", vm)
+                .field("target", target)
                 .field("name", &"<redacted>")
                 .finish(),
-            Self::PromptStop { vm, .. } => f
+            Self::PromptStop { target, .. } => f
                 .debug_struct("PromptStop")
-                .field("vm", vm)
+                .field("target", target)
                 .field("name", &"<redacted>")
                 .finish(),
-            Self::KillShell { vm, .. } => f
+            Self::KillShell { target, .. } => f
                 .debug_struct("KillShell")
-                .field("vm", vm)
+                .field("target", target)
                 .field("name", &"<redacted>")
                 .finish(),
-            Self::DetachShell { vm, .. } => f
+            Self::DetachShell { target, .. } => f
                 .debug_struct("DetachShell")
-                .field("vm", vm)
+                .field("target", target)
                 .field("name", &"<redacted>")
                 .finish(),
             Self::Disabled { reason } => {
@@ -654,13 +1082,23 @@ impl fmt::Debug for PlannedAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisabledReason {
+    TargetOffline,
+    TargetUnknown,
+    ProviderUnavailable,
+    UpdateRequired,
+    /// Compatibility reason retained for 0.1 consumers.
     VmOffline,
+    /// Compatibility reason retained for 0.1 consumers.
     VmUnknown,
 }
 
 impl DisabledReason {
     pub const fn metrics_label_value(self) -> &'static str {
         match self {
+            Self::TargetOffline => "disabled-target-offline",
+            Self::TargetUnknown => "disabled-target-unknown",
+            Self::ProviderUnavailable => "disabled-provider-unavailable",
+            Self::UpdateRequired => "disabled-update-required",
             Self::VmOffline => "disabled-vm-offline",
             Self::VmUnknown => "disabled-vm-unknown",
         }
@@ -711,9 +1149,21 @@ impl AsyncErrorEvent {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModelError {
-    EmptyVmId,
+    EmptyTargetId,
+    InvalidTargetId,
     EmptySessionId,
     InvalidCorrelation,
+}
+
+impl fmt::Display for ModelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::EmptyTargetId => "target id must not be empty",
+            Self::InvalidTargetId => "target id has an invalid shape",
+            Self::EmptySessionId => "session id must not be empty",
+            Self::InvalidCorrelation => "correlation id has an invalid shape",
+        })
+    }
 }
 
 #[cfg(test)]
@@ -726,6 +1176,13 @@ mod tests {
 
     fn shell(name: &str) -> FriendlyName {
         FriendlyName::from_candidate(name).unwrap()
+    }
+
+    fn endpoint(name: &str) -> ShellTarget {
+        ShellTarget {
+            id: vm(name),
+            provider_kind: ProviderKind::LocalVm,
+        }
     }
 
     fn model_with_vm(summary: VmSummary, config: Config) -> Model {
@@ -785,6 +1242,61 @@ mod tests {
     }
 
     #[test]
+    fn target_id_debug_is_redacted() {
+        let target = TargetId::new("tools.host.d2b").expect("target");
+        let rendered = format!("{target:?}");
+        assert!(!rendered.contains("tools.host.d2b"));
+        assert!(rendered.contains("redacted"));
+    }
+
+    #[test]
+    fn canonical_target_model_preserves_legacy_vm_serde_defaults() {
+        let legacy: WorkloadSummary = serde_json::from_value(serde_json::json!({
+            "id": "work",
+            "powerState": "online",
+            "sessions": []
+        }))
+        .expect("legacy 0.1 summary");
+        assert_eq!(legacy.target.as_str(), "work");
+        assert_eq!(legacy.id.as_str(), "work");
+        assert_eq!(legacy.provider_kind, ProviderKind::LocalVm);
+        assert!(legacy.shell_feature_available);
+
+        let summary = WorkloadSummary::discovered(
+            TargetId::new("builder.dev.d2b").unwrap(),
+            TargetId::new("builder").unwrap(),
+            TargetPowerState::Online,
+        );
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["target"], "builder.dev.d2b");
+        assert_eq!(json["id"], "builder");
+        assert_eq!(json["canonicalTarget"], "builder.dev.d2b");
+    }
+
+    #[test]
+    fn unsafe_local_posture_is_explicit_and_update_skew_disables_actions() {
+        let mut summary = WorkloadSummary::discovered(
+            TargetId::new("tools.host.d2b").unwrap(),
+            TargetId::new("tools").unwrap(),
+            TargetPowerState::Online,
+        );
+        summary.provider_kind = ProviderKind::UnsafeLocal;
+        summary.isolation_posture = IsolationPosture::UnsafeLocal;
+        summary.session_persistence = SessionPersistence::UserManagerLifetime;
+        summary.shell_feature_available = false;
+
+        assert!(!summary.actions_available());
+        assert_eq!(
+            summary.remediation().unwrap().kind,
+            RemediationKind::UpdateD2b
+        );
+        assert_eq!(
+            summary.isolation_posture.warning(),
+            Some("No isolation: runs in the host user session")
+        );
+    }
+
+    #[test]
     fn offline_vm_visual_state_disables_shell_actions() {
         let summary = VmSummary::new(vm("work"), VmPowerState::Offline);
         let visual = summary.visual_state();
@@ -803,27 +1315,29 @@ mod tests {
         );
 
         assert_eq!(
-            model.plan(UserIntent::ListSessions { vm: work.clone() }),
+            model.plan(UserIntent::ListSessions {
+                target: work.clone()
+            }),
             PlannedAction::Disabled {
-                reason: DisabledReason::VmOffline
+                reason: DisabledReason::TargetOffline
             }
         );
         assert_eq!(
             model.plan(UserIntent::CreateSession {
-                vm: work.clone(),
+                target: work.clone(),
                 name: shell("quiet-otter")
             }),
             PlannedAction::Disabled {
-                reason: DisabledReason::VmOffline
+                reason: DisabledReason::TargetOffline
             }
         );
         assert_eq!(
             model.plan(UserIntent::OpenSession {
-                vm: work,
+                target: work,
                 name: shell("quiet-otter")
             }),
             PlannedAction::Disabled {
-                reason: DisabledReason::VmOffline
+                reason: DisabledReason::TargetOffline
             }
         );
     }
@@ -839,11 +1353,11 @@ mod tests {
         let focus_model = model_with_vm(summary.clone(), Config::default());
         assert_eq!(
             focus_model.plan(UserIntent::OpenSession {
-                vm: work.clone(),
+                target: work.clone(),
                 name: shell("quiet-otter")
             }),
             PlannedAction::FocusExistingShell {
-                vm: work.clone(),
+                target: endpoint("work"),
                 name: shell("quiet-otter")
             }
         );
@@ -853,11 +1367,11 @@ mod tests {
         let prompt_model = model_with_vm(summary.clone(), prompt_cfg);
         assert_eq!(
             prompt_model.plan(UserIntent::OpenSession {
-                vm: work.clone(),
+                target: work.clone(),
                 name: shell("quiet-otter")
             }),
             PlannedAction::PromptAlreadyAttached {
-                vm: work.clone(),
+                target: endpoint("work"),
                 name: shell("quiet-otter")
             }
         );
@@ -867,11 +1381,11 @@ mod tests {
         let force_model = model_with_vm(summary, force_cfg);
         assert_eq!(
             force_model.plan(UserIntent::OpenSession {
-                vm: work.clone(),
+                target: work.clone(),
                 name: shell("quiet-otter")
             }),
             PlannedAction::AttachShell {
-                vm: work,
+                target: endpoint("work"),
                 name: Some(shell("quiet-otter")),
                 force: true
             }
@@ -880,28 +1394,34 @@ mod tests {
 
     #[test]
     fn stop_requires_confirmation_until_confirmed() {
-        let model = Model::new(Config::default());
         let work = vm("work");
+        let model = model_with_vm(
+            VmSummary::new(work.clone(), VmPowerState::Online),
+            Config::default(),
+        );
         let name = shell("quiet-otter");
 
         assert_eq!(
             model.plan(UserIntent::StopShell {
-                vm: work.clone(),
+                target: work.clone(),
                 name: name.clone(),
                 confirmed: false
             }),
             PlannedAction::PromptStop {
-                vm: work.clone(),
+                target: endpoint("work"),
                 name: name.clone()
             }
         );
         assert_eq!(
             model.plan(UserIntent::StopShell {
-                vm: work.clone(),
+                target: work,
                 name: name.clone(),
                 confirmed: true
             }),
-            PlannedAction::KillShell { vm: work, name }
+            PlannedAction::KillShell {
+                target: endpoint("work"),
+                name
+            }
         );
     }
 
@@ -943,7 +1463,7 @@ mod tests {
     #[test]
     fn shell_names_do_not_expand_metric_cardinality() {
         let action = PlannedAction::AttachShell {
-            vm: vm("work"),
+            target: endpoint("work"),
             name: Some(shell("customer-project-shell")),
             force: false,
         };

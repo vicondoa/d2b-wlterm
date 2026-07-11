@@ -1,32 +1,40 @@
-# Design sketch
+# Design
 
-`d2b-wlterm` is a small user-session companion for d2b desktop workflows. It is
-not a privileged control plane. It should talk to d2b through the public daemon
-socket, then launch or focus a WeezTerm window using user-session state.
+`d2b-wlterm` is an unprivileged user-session companion. It discovers
+shell-capable workloads and performs shell operations through d2bd's public
+socket using d2b-toolkit's runtime-agnostic transport.
 
-The core model is a reducer over VM snapshots and UI events. It keeps offline
-VMs visible but disables shell list, create, and open actions until the VM is
-online. Planned effects stay typed so frontends can render prompts without
-reaching into d2b state directly.
+## Workload model
 
-The model keeps three safety-sensitive concepts explicit:
+The canonical identifier is `<workload>.<realm>[.<ancestor>...].d2b`. Inventory
+rows must advertise `persistent-shell` and contain a shell launcher item.
+`legacyVmName` and the legacy flat `id`/`vms` JSON fields remain compatibility
+aliases; dispatch always preserves the canonical target. This permits
+first-class local VMs with no legacy name and unsafe-local workloads without
+coercing either into a VM-only model.
 
-1. **Stop confirmation**: destructive Stop actions require confirmation before a
-   frontend sends a public-socket shell kill to d2b.
-2. **Already-attached Open**: opening a VM/session that already has a terminal
-   can focus the existing attachment, prompt the user, or force a new attach
-   according to config.
-3. **Async error display**: delayed d2b or compositor errors are captured as UI
-   events with bounded correlation so a status bar, Waybar, or frontend can surface them
-   after the initiating click without exposing shell names, handles, or terminal
-   bytes.
+Realm grouping is presentation metadata derived from the canonical target.
+Cards expose provider kind, typed isolation posture, session persistence,
+availability, and remediation.
 
-The d2b adapter crate consumes shared toolkit DTOs and `d2b-client` to execute
-planned shell list, attach, disconnect, and kill actions over the public daemon
-socket. It refuses privileged broker paths, does not invoke subprocess bridges
-for shell attach/open, and keeps offline VM actions disabled in the planner.
+`unsafe-local` means no isolation boundary. Its shells run in the authenticated
+host user's session and may access that user's files, network, agents, D-Bus,
+and other ambient resources. The UI therefore displays an explicit
+`UNSAFE LOCAL · NO ISOLATION` warning.
 
-WeezTerm integration is deliberately a command boundary, not a privileged
-control-plane dependency. `d2b-wlterm` chooses which terminal command to launch
-from config, and WeezTerm's native d2b provider, when used, speaks the same
-public daemon socket through the shared toolkit crates.
+## Safety boundaries
+
+1. Stop requires confirmation before a shell kill is sent.
+2. Opening an attached shell focuses, prompts, or force-opens according to
+   configuration; there is still one active attachment unless force is explicit.
+3. Unsafe-local shell calls require negotiated `unsafe-local-shell-v1`. Version
+   skew disables those actions with an update remediation.
+4. Public requests contain canonical targets and semantic shell operations, not
+   argv, environment, cwd, paths, terminal bytes, or private helper messages.
+5. GUI windows are launched only as children of `d2b-wayland-proxy`. The
+   launcher waits for typed first-client readiness and terminates the proxy on
+   failure. It never starts WezTerm directly as a fallback.
+
+The client does not access the privileged broker, private unsafe-local helper,
+root-owned bundle artifacts, or host process state. WezTerm remains the sole
+terminal backend and speaks the same public shell protocol for its byte stream.
