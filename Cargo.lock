@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "d2b-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "d2b-toolkit-core",
@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "d2b-toolkit-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "wlterm-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "d2b-toolkit-core",
  "futures",
@@ -694,8 +694,9 @@ dependencies = [
 
 [[package]]
 name = "wlterm-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "d2b-toolkit-core",
  "petname",
  "serde",
  "serde_json",
@@ -703,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "wlterm-d2b"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "d2b-client",
  "d2b-toolkit-core",
@@ -717,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "wlterm-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -727,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "wlterm-waybar"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",

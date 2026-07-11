@@ -1,13 +1,20 @@
 use std::env;
 use std::fs;
-use std::process::{Command, ExitCode, Stdio};
+use std::io::{BufRead, BufReader};
+use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitCode, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
+use serde::Deserialize;
 use wlterm_core::friendly_name::FriendlyName;
 use wlterm_core::{
-    AsyncErrorDisplay, Config, Model, ModelEvent, OpenBehavior, PlannedAction, SessionId, VmId,
-    VmPowerState, VmSummary,
+    AsyncErrorDisplay, Config, Model, ModelEvent, OpenBehavior, PlannedAction, ProviderKind,
+    SessionId, ShellTarget, TargetId, WorkloadSummary,
 };
-use wlterm_d2b::{D2bActionBoundary, D2bActionOutcome};
+use wlterm_d2b::{D2bActionBoundary, D2bActionOutcome, D2bClientConfig, D2bClientErrorKind};
 use wlterm_ui::{
     decide_open, AlreadyAttachedNotice, AsyncErrorEvent, ControlCenterState, OpenDecision,
     RenderedAsyncError, ShellNamePrompt, StopRequest,
@@ -26,6 +33,16 @@ fn main() -> ExitCode {
             eprintln!("d2b-wlterm: {err}");
             ExitCode::from(2)
         }
+    }
+}
+
+fn terminal_proxy_provider(workload: &WorkloadSummary) -> ProviderKind {
+    if workload.provider_kind.is_unsafe_local() {
+        // The proxied child is the trusted terminal client, not the unsafe-local
+        // workload process. The shell itself remains daemon/helper-routed.
+        ProviderKind::LocalVm
+    } else {
+        workload.provider_kind
     }
 }
 
@@ -95,7 +112,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
 }
 
 fn help() -> String {
-    "d2b-wlterm\n\nCommands:\n  name [seed]\n  waybar\n  state|status-json\n  control-center|quickshell\n  prompt-name [shell]\n  already-attached [focus-existing|prompt|force-open]\n  list <vm>\n  create <vm> [shell]\n  open <vm> <shell> [--force]\n  detach <vm> <shell>\n  stop <vm> <shell> --confirm\n  config\n  async-error".to_string()
+    "d2b-wlterm\n\nCommands:\n  name [seed]\n  waybar\n  state|status-json\n  control-center|quickshell\n  prompt-name [shell]\n  already-attached [focus-existing|prompt|force-open]\n  list <target>\n  create <target> [shell]\n  open <target> <shell> [--force]\n  detach <target> <shell>\n  stop <target> <shell> --confirm\n  config\n  async-error".to_string()
 }
 
 fn load_config() -> Config {
@@ -125,166 +142,39 @@ fn live_model(config: &Config) -> Model {
     if env::var_os("D2B_WLTERM_TEST_IDLE").is_some() {
         return model;
     }
-    let boundary = D2bActionBoundary::new(wlterm_d2b::D2bClientConfig {
+    let boundary = D2bActionBoundary::new(D2bClientConfig {
         public_socket_path: config.public_socket_path.clone(),
         ..Default::default()
     });
-    let mut vms = Vec::new();
-    for candidate in list_running_vms() {
-        let vm = match VmId::new(candidate.name.clone()) {
-            Ok(vm) => vm,
-            Err(_) => continue,
-        };
-        let outcome = boundary.execute_blocking(PlannedAction::ListSessions { vm: vm.clone() });
-        let Ok(D2bActionOutcome::Listed { sessions, .. }) = outcome else {
-            continue;
-        };
-        let mut summary = VmSummary::new(vm, VmPowerState::Online);
-        summary.canonical_target = candidate.canonical_target;
-        summary.sessions = sessions;
-        vms.push(summary);
+    match boundary.inventory_blocking() {
+        Ok(workloads) => model.apply(ModelEvent::WorkloadSnapshot { workloads }),
+        Err(error) => {
+            if matches!(error.kind(), D2bClientErrorKind::FeatureUnavailable(_)) {
+                model.apply(ModelEvent::GlobalRemediation {
+                    remediation: wlterm_core::TargetRemediation {
+                        kind: wlterm_core::RemediationKind::UpdateD2b,
+                        message:
+                            "Update d2b, d2bd, d2b-toolkit, and d2b-unsafe-local-helper together",
+                    },
+                });
+            }
+            model.apply(ModelEvent::AsyncError {
+                message: error.to_string(),
+            });
+        }
     }
-    model.apply(ModelEvent::VmSnapshot { vms });
     model
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct VmDiscovery {
-    name: String,
-    canonical_target: Option<String>,
-}
-
-fn list_running_vms() -> Vec<VmDiscovery> {
-    list_running_vms_json().unwrap_or_else(list_running_vms_text)
-}
-
-fn list_running_vms_json() -> Option<Vec<VmDiscovery>> {
-    let output = Command::new("d2b")
-        .args(["list", "--json"])
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    let entries = value.as_array().cloned().or_else(|| {
-        value
-            .get("vms")
-            .and_then(serde_json::Value::as_array)
-            .cloned()
-    })?;
-    Some(
-        entries
-            .iter()
-            .filter_map(vm_discovery_from_json)
-            .collect::<Vec<_>>(),
-    )
-}
-
-fn vm_discovery_from_json(value: &serde_json::Value) -> Option<VmDiscovery> {
-    let name = string_field(value, &["name", "vm"])?;
-    let state = string_field(value, &["status", "state"])
-        .or_else(|| nested_string_field(value, "lifecycle", &["state"]))
-        .or_else(|| nested_string_field(value, "runtime", &["state", "detail", "kind"]))
-        .unwrap_or_default();
-    let running = state.starts_with("running") || state == "online";
-    if !running || name.starts_with("sys-") {
-        return None;
-    }
-    Some(VmDiscovery {
-        canonical_target: canonical_target_from_json(value)
-            .or_else(|| canonical_local_target(&name)),
-        name,
-    })
-}
-
-fn string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
-        .map(str::to_owned)
-}
-
-fn nested_string_field(value: &serde_json::Value, parent: &str, keys: &[&str]) -> Option<String> {
-    value
-        .get(parent)
-        .and_then(|child| string_field(child, keys))
-}
-
-fn canonical_target_from_json(value: &serde_json::Value) -> Option<String> {
-    string_field(
-        value,
-        &[
-            "canonicalTarget",
-            "canonical_target",
-            "realmTarget",
-            "realm_target",
-            "target",
-        ],
-    )
-    .or_else(|| {
-        value.get("identity").and_then(|identity| {
-            string_field(
-                identity,
-                &[
-                    "canonicalTarget",
-                    "canonical_target",
-                    "realmTarget",
-                    "realm_target",
-                ],
-            )
+fn run_list(target: Option<&String>) -> Result<String, String> {
+    let config = load_config();
+    let boundary = boundary_for(&config);
+    let workload = resolve_shell_workload(&boundary, target)?;
+    ensure_workload_available(&workload)?;
+    let outcome = boundary
+        .execute_blocking(PlannedAction::ListSessions {
+            target: workload.shell_target(),
         })
-    })
-}
-
-fn canonical_local_target(vm: &str) -> Option<String> {
-    if is_canonical_vm_label(vm) {
-        Some(format!("{vm}.local.d2b"))
-    } else {
-        None
-    }
-}
-
-fn is_canonical_vm_label(value: &str) -> bool {
-    let mut chars = value.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
-
-fn list_running_vms_text() -> Vec<VmDiscovery> {
-    let output = Command::new("d2b")
-        .args(["vm", "list"])
-        .stdin(Stdio::null())
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let vm = parts.next()?;
-            let state = parts.next().unwrap_or("unknown");
-            if state == "running" && !vm.starts_with("sys-") {
-                Some(VmDiscovery {
-                    name: vm.to_string(),
-                    canonical_target: canonical_local_target(vm),
-                })
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-fn run_list(vm: Option<&String>) -> Result<String, String> {
-    let vm = parse_vm(vm)?;
-    let outcome = D2bActionBoundary::new(Default::default())
-        .execute_blocking(PlannedAction::ListSessions { vm })
         .map_err(|err| err.to_string())?;
     let D2bActionOutcome::Listed { sessions, .. } = outcome else {
         return Err("unexpected list result".to_string());
@@ -303,34 +193,50 @@ fn run_list(vm: Option<&String>) -> Result<String, String> {
         .join("\n"))
 }
 
-fn run_create(vm: Option<&String>, name: Option<&String>) -> Result<String, String> {
-    let vm = parse_vm(vm)?;
+fn run_create(target: Option<&String>, name: Option<&String>) -> Result<String, String> {
+    let config = load_config();
+    let boundary = boundary_for(&config);
+    let workload = resolve_shell_workload(&boundary, target)?;
+    ensure_workload_available(&workload)?;
     let name = match name {
         Some(name) => parse_shell_name(Some(name))?,
         None => FriendlyName::generate().map_err(|_| "unable to allocate a friendly name")?,
     };
-    let resolved = ensure_shell(&vm, &name, false)?;
-    spawn_terminal(&load_config(), &vm, &resolved)?;
+    let resolved = ensure_shell(&boundary, workload.shell_target(), &name, false)?;
+    spawn_terminal(&config, &workload, &resolved)?;
     Ok(format!("opened={}", resolved.as_str()))
 }
 
-fn run_open(vm: Option<&String>, name: Option<&String>, force: bool) -> Result<String, String> {
-    let vm = parse_vm(vm)?;
+fn run_open(target: Option<&String>, name: Option<&String>, force: bool) -> Result<String, String> {
+    let config = load_config();
+    let boundary = boundary_for(&config);
+    let workload = resolve_shell_workload(&boundary, target)?;
+    ensure_workload_available(&workload)?;
     let name = parse_shell_name(name)?;
-    let resolved = ensure_shell(&vm, &name, force)?;
-    spawn_terminal(&load_config(), &vm, &resolved)?;
+    let resolved = ensure_shell(&boundary, workload.shell_target(), &name, force)?;
+    spawn_terminal(&config, &workload, &resolved)?;
     Ok(format!("opened={}", resolved.as_str()))
 }
 
-fn run_stop(vm: Option<&String>, name: Option<&String>, confirmed: bool) -> Result<String, String> {
-    let vm = parse_vm(vm)?;
-    let name = parse_shell_name(name)?;
+fn run_stop(
+    target: Option<&String>,
+    name: Option<&String>,
+    confirmed: bool,
+) -> Result<String, String> {
     if !confirmed {
         return Err("stop requires --confirm".to_string());
     }
+    let config = load_config();
+    let boundary = boundary_for(&config);
+    let workload = resolve_shell_workload(&boundary, target)?;
+    ensure_workload_available(&workload)?;
+    let name = parse_shell_name(name)?;
 
-    let action = PlannedAction::KillShell { vm, name };
-    let outcome = D2bActionBoundary::new(Default::default())
+    let action = PlannedAction::KillShell {
+        target: workload.shell_target(),
+        name,
+    };
+    let outcome = boundary
         .execute_blocking(action)
         .map_err(|err| err.to_string())?;
     match outcome {
@@ -339,11 +245,17 @@ fn run_stop(vm: Option<&String>, name: Option<&String>, confirmed: bool) -> Resu
     }
 }
 
-fn run_detach(vm: Option<&String>, name: Option<&String>) -> Result<String, String> {
-    let vm = parse_vm(vm)?;
+fn run_detach(target: Option<&String>, name: Option<&String>) -> Result<String, String> {
+    let config = load_config();
+    let boundary = boundary_for(&config);
+    let workload = resolve_shell_workload(&boundary, target)?;
+    ensure_workload_available(&workload)?;
     let name = parse_shell_name(name)?;
-    let outcome = D2bActionBoundary::new(Default::default())
-        .execute_blocking(PlannedAction::DetachShell { vm, name })
+    let outcome = boundary
+        .execute_blocking(PlannedAction::DetachShell {
+            target: workload.shell_target(),
+            name,
+        })
         .map_err(|err| err.to_string())?;
     match outcome {
         D2bActionOutcome::Detached { result, .. } => Ok(format!("detached={}", result.detached)),
@@ -351,13 +263,18 @@ fn run_detach(vm: Option<&String>, name: Option<&String>) -> Result<String, Stri
     }
 }
 
-fn ensure_shell(vm: &VmId, name: &FriendlyName, force: bool) -> Result<FriendlyName, String> {
+fn ensure_shell(
+    boundary: &D2bActionBoundary,
+    target: ShellTarget,
+    name: &FriendlyName,
+    force: bool,
+) -> Result<FriendlyName, String> {
     let action = PlannedAction::AttachShell {
-        vm: vm.clone(),
+        target,
         name: Some(name.clone()),
         force,
     };
-    let outcome = D2bActionBoundary::new(Default::default())
+    let outcome = boundary
         .execute_blocking(action)
         .map_err(|err| err.to_string())?;
     let D2bActionOutcome::Attached {
@@ -372,43 +289,358 @@ fn ensure_shell(vm: &VmId, name: &FriendlyName, force: bool) -> Result<FriendlyN
     Ok(resolved_name)
 }
 
-fn spawn_terminal(config: &Config, vm: &VmId, shell: &FriendlyName) -> Result<(), String> {
-    let terminal_command = render_terminal_command(config, vm, shell);
+const PROXY_READY_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_READINESS_EVENT_BYTES: usize = 4096;
+static READINESS_SOCKET_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+struct ProxyReadinessSocket {
+    listener: UnixListener,
+    path: PathBuf,
+}
+
+impl ProxyReadinessSocket {
+    fn bind() -> Result<Self, String> {
+        let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                "XDG_RUNTIME_DIR is required for proxied terminal windows".to_string()
+            })?;
+        let directory = runtime_dir.join("d2b-wlterm").join("proxy-readiness");
+        ensure_private_directory(&directory)?;
+        let sequence = READINESS_SOCKET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = directory.join(format!("{}-{sequence}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path)
+            .map_err(|_| "failed to create d2b-wayland-proxy readiness socket".to_string())?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|_| "failed to secure d2b-wayland-proxy readiness socket".to_string())?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|_| "failed to configure d2b-wayland-proxy readiness socket".to_string())?;
+        Ok(Self { listener, path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn wait_until_ready(
+        &self,
+        child: &mut Child,
+        workload: &WorkloadSummary,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + PROXY_READY_TIMEOUT;
+        loop {
+            match self.listener.accept() {
+                Ok((stream, _)) => {
+                    return wait_for_proxy_events(stream, deadline, workload);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if child
+                        .try_wait()
+                        .map_err(|_| "failed to inspect d2b-wayland-proxy".to_string())?
+                        .is_some()
+                    {
+                        return Err(
+                            "d2b-wayland-proxy exited before terminal readiness; no direct fallback"
+                                .to_string(),
+                        );
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(
+                            "d2b-wayland-proxy readiness timed out; no direct fallback".to_string()
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => {
+                    return Err(
+                        "d2b-wayland-proxy readiness channel failed; no direct fallback"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ProxyReadinessSocket {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn ensure_private_directory(path: &Path) -> Result<(), String> {
+    if path.exists() {
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|_| "failed to inspect proxy readiness directory".to_string())?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("proxy readiness directory is not a private directory".to_string());
+        }
+    } else {
+        fs::create_dir_all(path)
+            .map_err(|_| "failed to create proxy readiness directory".to_string())?;
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .map_err(|_| "failed to secure proxy readiness directory".to_string())
+}
+
+fn wait_for_proxy_events(
+    stream: UnixStream,
+    deadline: Instant,
+    workload: &WorkloadSummary,
+) -> Result<(), String> {
+    stream
+        .set_read_timeout(Some(deadline.saturating_duration_since(Instant::now())))
+        .map_err(|_| "failed to configure proxy readiness deadline".to_string())?;
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line).map_err(|_| {
+            "d2b-wayland-proxy readiness channel failed; no direct fallback".to_string()
+        })?;
+        if read == 0 {
+            return Err(
+                "d2b-wayland-proxy closed before terminal readiness; no direct fallback"
+                    .to_string(),
+            );
+        }
+        if read > MAX_READINESS_EVENT_BYTES {
+            return Err("d2b-wayland-proxy readiness event exceeded its bound".to_string());
+        }
+        let event: ProxyReadinessEvent = serde_json::from_str(line.trim_end())
+            .map_err(|_| "d2b-wayland-proxy sent an invalid readiness event".to_string())?;
+        event.validate_for(workload)?;
+        match (event.state, event.stage) {
+            (ProxyReadinessState::Ready, ProxyReadinessStage::FirstClient) => return Ok(()),
+            (ProxyReadinessState::Failed, stage) => {
+                return Err(format!(
+                    "d2b-wayland-proxy failed at {} ({}); no direct fallback",
+                    stage.label(),
+                    event
+                        .failure
+                        .map(ProxyReadinessFailure::label)
+                        .unwrap_or("unknown")
+                ));
+            }
+            (ProxyReadinessState::Ready, _) => {}
+        }
+        if Instant::now() >= deadline {
+            return Err("d2b-wayland-proxy readiness timed out; no direct fallback".to_string());
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum ProxyReadinessStage {
+    Upstream,
+    Listener,
+    FirstClient,
+}
+
+impl ProxyReadinessStage {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Upstream => "upstream",
+            Self::Listener => "listener",
+            Self::FirstClient => "first-client",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum ProxyReadinessState {
+    Ready,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum ProxyReadinessFailure {
+    UpstreamUnavailable,
+    ListenerUnavailable,
+    FirstClientTimeout,
+    ClientRejected,
+    ChannelUnavailable,
+}
+
+impl ProxyReadinessFailure {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::UpstreamUnavailable => "upstream-unavailable",
+            Self::ListenerUnavailable => "listener-unavailable",
+            Self::FirstClientTimeout => "first-client-timeout",
+            Self::ClientRejected => "client-rejected",
+            Self::ChannelUnavailable => "channel-unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProxyReadinessEvent {
+    protocol_version: u16,
+    target: String,
+    provider_kind: ProviderKind,
+    stage: ProxyReadinessStage,
+    state: ProxyReadinessState,
+    #[serde(default)]
+    failure: Option<ProxyReadinessFailure>,
+}
+
+impl ProxyReadinessEvent {
+    fn validate_for(&self, workload: &WorkloadSummary) -> Result<(), String> {
+        if self.protocol_version != 1
+            || self.target != workload.target.as_str()
+            || self.provider_kind != terminal_proxy_provider(workload)
+            || (self.state == ProxyReadinessState::Ready && self.failure.is_some())
+            || (self.state == ProxyReadinessState::Failed && self.failure.is_none())
+        {
+            return Err("d2b-wayland-proxy readiness identity mismatch".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn boundary_for(config: &Config) -> D2bActionBoundary {
+    D2bActionBoundary::new(D2bClientConfig {
+        public_socket_path: config.public_socket_path.clone(),
+        ..D2bClientConfig::default()
+    })
+}
+
+fn resolve_shell_workload(
+    boundary: &D2bActionBoundary,
+    raw_target: Option<&String>,
+) -> Result<WorkloadSummary, String> {
+    let requested = parse_target(raw_target)?;
+    let workloads = boundary
+        .discover_blocking()
+        .map_err(|err| err.to_string())?;
+    if requested.is_canonical() {
+        return workloads
+            .into_iter()
+            .find(|workload| workload.target == requested)
+            .ok_or_else(|| "target is not an advertised persistent-shell workload".to_string());
+    }
+    let mut matches = workloads.into_iter().filter(|workload| {
+        workload.id == requested
+            || workload
+                .legacy_vm_name
+                .as_deref()
+                .is_some_and(|legacy| legacy == requested.as_str())
+    });
+    let Some(workload) = matches.next() else {
+        return Err("target is not an advertised persistent-shell workload".to_string());
+    };
+    if matches.next().is_some() {
+        return Err("target alias is ambiguous; use a canonical workload target".to_string());
+    }
+    Ok(workload)
+}
+
+fn ensure_workload_available(workload: &WorkloadSummary) -> Result<(), String> {
+    if workload.actions_available() {
+        return Ok(());
+    }
+    let reason = if !workload.shell_feature_available {
+        "unsafe-local-shell-v1 is unavailable".to_string()
+    } else if !workload.availability.is_ready() {
+        format!(
+            "provider is {}",
+            workload.availability.metrics_label_value()
+        )
+    } else {
+        "target is not running".to_string()
+    };
+    let remediation = workload
+        .remediation()
+        .map(|value| format!("; remediation: {}", value.message))
+        .unwrap_or_default();
+    Err(format!("{reason}{remediation}"))
+}
+
+fn spawn_terminal(
+    config: &Config,
+    workload: &WorkloadSummary,
+    shell: &FriendlyName,
+) -> Result<(), String> {
+    let readiness = ProxyReadinessSocket::bind()?;
+    let terminal_command = render_terminal_command(config, workload, shell);
     let Some((terminal_program, terminal_args)) = terminal_command.split_first() else {
         return Err("wezterm_command must not be empty".to_string());
     };
-    let proxy_command = render_proxy_command(config, vm, terminal_program, terminal_args);
+    let proxy_command = render_proxy_command(
+        config,
+        workload,
+        terminal_program,
+        terminal_args,
+        readiness.path(),
+    );
     let Some((program, args)) = proxy_command.split_first() else {
         return Err("wayland_proxy_command must not be empty".to_string());
     };
-    Command::new(program)
+    let mut proxy = Command::new(program)
         .args(args)
         .env("WEEZTERM_D2B_SHELL_NAME", shell.as_str())
-        .env("WEEZTERM_D2B_BOUND_VM", vm.as_str())
+        .env("WEEZTERM_D2B_BOUND_TARGET", workload.target.as_str())
+        .env(
+            "WEEZTERM_D2B_BOUND_VM",
+            workload
+                .legacy_vm_name
+                .as_deref()
+                .unwrap_or(workload.target.as_str()),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|err| format!("failed to launch terminal: {err}"))?;
+        .map_err(|_| "failed to launch d2b-wayland-proxy".to_string())?;
+    if let Err(error) = readiness.wait_until_ready(&mut proxy, workload) {
+        let _ = proxy.kill();
+        let _ = proxy.wait();
+        return Err(error);
+    }
     Ok(())
 }
 
 fn render_proxy_command(
     config: &Config,
-    vm: &VmId,
+    workload: &WorkloadSummary,
     terminal_program: &str,
     terminal_args: &[String],
+    readiness_path: &Path,
 ) -> Vec<String> {
     let mut command = config.wayland_proxy_command.clone();
     command.extend([
         "--host-terminal".to_string(),
-        "--vm-name".to_string(),
-        vm.as_str().to_string(),
+        "--target".to_string(),
+        workload.target.as_str().to_string(),
+        "--provider-kind".to_string(),
+        terminal_proxy_provider(workload)
+            .metrics_label_value()
+            .to_string(),
         "--border-enable".to_string(),
         "--border-label".to_string(),
-        vm.as_str().to_string(),
+        proxy_label(workload),
+        "--readiness-socket".to_string(),
+        readiness_path.display().to_string(),
+        "--first-client-timeout-ms".to_string(),
+        PROXY_READY_TIMEOUT.as_millis().to_string(),
     ]);
-    if let Some(colors) = vm_border_colors(vm) {
+    if let Some(legacy) = &workload.legacy_vm_name {
+        command.extend(["--vm-name".to_string(), legacy.clone()]);
+    }
+    if workload.provider_kind.is_unsafe_local() {
+        command.extend([
+            "--app-id-prefix".to_string(),
+            format!("d2b.unsafe-local.{}.", workload.target.as_str()),
+            "--title-prefix".to_string(),
+            format!("[unsafe-local {}] ", workload.target.as_str()),
+        ]);
+    }
+    if let Some(colors) = target_border_colors(workload) {
         command.extend([
             "--border-color-active".to_string(),
             colors.active,
@@ -434,17 +666,35 @@ struct BorderColors {
     urgent: String,
 }
 
-fn vm_border_colors(vm: &VmId) -> Option<BorderColors> {
+fn target_border_colors(workload: &WorkloadSummary) -> Option<BorderColors> {
     let text = fs::read_to_string("/etc/d2b/ui-colors.json").ok()?;
     let root: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let border = root.get("vms")?.get(vm.as_str())?.get("border")?;
-    let active = color_string(border.get("active")?)?;
+    let legacy = workload
+        .legacy_vm_name
+        .as_deref()
+        .unwrap_or(workload.id.as_str());
+    let border = root
+        .get("vms")
+        .and_then(|vms| vms.get(legacy))
+        .and_then(|vm| vm.get("border"));
+    let realm = wlterm_core::realm_from_canonical_target(workload.target.as_str());
+    let realm_accent = realm.and_then(|realm| {
+        root.get("realms")
+            .and_then(|realms| realms.get(realm))
+            .or_else(|| root.get("envs").and_then(|envs| envs.get(realm)))
+            .and_then(|value| value.get("accent"))
+            .and_then(color_string)
+    });
+    let active = border
+        .and_then(|border| border.get("active"))
+        .and_then(color_string)
+        .or(realm_accent)?;
     let inactive = border
-        .get("inactive")
+        .and_then(|border| border.get("inactive"))
         .and_then(color_string)
         .unwrap_or_else(|| active.clone());
     let urgent = border
-        .get("urgent")
+        .and_then(|border| border.get("urgent"))
         .and_then(color_string)
         .unwrap_or_else(|| active.clone());
     Some(BorderColors {
@@ -463,13 +713,30 @@ fn color_string(value: &serde_json::Value) -> Option<String> {
     valid.then(|| color.to_string())
 }
 
-fn render_terminal_command(config: &Config, vm: &VmId, shell: &FriendlyName) -> Vec<String> {
-    let domain = format!("d2b-{}", vm.as_str());
+fn proxy_label(workload: &WorkloadSummary) -> String {
+    if workload.provider_kind.is_unsafe_local() {
+        format!("{} · unsafe-local · NO ISOLATION", workload.target.as_str())
+    } else {
+        workload.target.as_str().to_string()
+    }
+}
+
+fn render_terminal_command(
+    config: &Config,
+    workload: &WorkloadSummary,
+    shell: &FriendlyName,
+) -> Vec<String> {
+    let domain = format!("d2b-{}", workload.target.as_str());
+    let legacy = workload
+        .legacy_vm_name
+        .as_deref()
+        .unwrap_or(workload.target.as_str());
     let mut command: Vec<String> = config
         .wezterm_command
         .iter()
         .map(|part| {
-            part.replace("{vm}", vm.as_str())
+            part.replace("{target}", workload.target.as_str())
+                .replace("{vm}", legacy)
                 .replace("{shell}", shell.as_str())
                 .replace("{domain}", &domain)
         })
@@ -510,9 +777,9 @@ fn ensure_weezterm_domain(command: &mut Vec<String>, domain: &str) {
     }
 }
 
-fn parse_vm(value: Option<&String>) -> Result<VmId, String> {
-    VmId::new(value.ok_or_else(|| "vm is required".to_string())?)
-        .map_err(|_| "vm id must not be empty".to_string())
+fn parse_target(value: Option<&String>) -> Result<TargetId, String> {
+    TargetId::new(value.ok_or_else(|| "target is required".to_string())?)
+        .map_err(|_| "target must be a canonical d2b target or legacy VM name".to_string())
 }
 
 fn parse_shell_name(value: Option<&String>) -> Result<FriendlyName, String> {
@@ -582,6 +849,7 @@ fn render_already_attached(value: Option<&String>) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
 
     #[test]
     fn name_command_validates_candidate() {
@@ -603,48 +871,102 @@ mod tests {
     }
 
     #[test]
-    fn json_vm_discovery_preserves_canonical_targets_and_filters_non_running() {
-        let value = serde_json::json!([
-            {
-                "name": "dev-general",
-                "status": "running",
-                "canonicalTarget": "dev-general.dev.local.d2b"
-            },
-            {
-                "name": "home-general",
-                "status": "stopped",
-                "canonicalTarget": "home-general.home.local.d2b"
-            },
-            {
-                "name": "sys-dev-net",
-                "status": "running"
-            },
-            {
-                "name": "work-aad",
-                "runtime": { "state": "running" }
-            }
-        ]);
+    fn discovery_has_no_cli_subprocess_fallback() {
+        let source = include_str!("main.rs");
+        assert!(!source.contains("Command::new(\"d2b\")"));
+        assert!(!source.contains("[\"list\", \"--json\"]"));
+        assert!(!source.contains("[\"vm\", \"list\"]"));
+    }
 
-        let discovered = value
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(vm_discovery_from_json)
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            discovered,
-            vec![
-                VmDiscovery {
-                    name: "dev-general".to_string(),
-                    canonical_target: Some("dev-general.dev.local.d2b".to_string()),
-                },
-                VmDiscovery {
-                    name: "work-aad".to_string(),
-                    canonical_target: Some("work-aad.local.d2b".to_string()),
-                }
-            ]
+    fn workload() -> WorkloadSummary {
+        let mut workload = WorkloadSummary::discovered(
+            TargetId::new("dev-general.dev.d2b").unwrap(),
+            TargetId::new("dev-general").unwrap(),
+            wlterm_core::TargetPowerState::Online,
         );
+        workload.legacy_vm_name = Some("dev-general".to_string());
+        workload
+    }
+
+    fn unsafe_workload() -> WorkloadSummary {
+        let mut workload = WorkloadSummary::discovered(
+            TargetId::new("tools.host.d2b").unwrap(),
+            TargetId::new("tools").unwrap(),
+            wlterm_core::TargetPowerState::Online,
+        );
+        workload.provider_kind = ProviderKind::UnsafeLocal;
+        workload.isolation_posture = wlterm_core::IsolationPosture::UnsafeLocal;
+        workload
+    }
+
+    #[test]
+    fn proxy_command_requires_typed_readiness_and_canonical_identity() {
+        let cfg = Config::default();
+        let command = render_proxy_command(
+            &cfg,
+            &unsafe_workload(),
+            "wezterm",
+            &["start".to_string()],
+            Path::new("/run/user/1000/d2b-wlterm/proxy-readiness/test.sock"),
+        );
+        assert_eq!(command[0], "d2b-wayland-proxy");
+        assert!(command
+            .windows(2)
+            .any(|pair| pair == ["--target", "tools.host.d2b"]));
+        assert!(command
+            .windows(2)
+            .any(|pair| pair == ["--provider-kind", "local-vm"]));
+        assert!(command
+            .windows(2)
+            .any(|pair| pair[0] == "--readiness-socket"));
+        assert!(command.iter().any(|arg| arg == "--first-client-timeout-ms"));
+        assert!(command.iter().any(|arg| arg.contains("NO ISOLATION")));
+        assert!(command
+            .iter()
+            .any(|arg| arg == "[unsafe-local tools.host.d2b] "));
+    }
+
+    #[test]
+    fn proxy_failure_is_typed_and_has_no_direct_terminal_fallback() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let producer = std::thread::spawn(move || {
+            writer
+                .write_all(
+                    br#"{"protocolVersion":1,"target":"tools.host.d2b","providerKind":"local-vm","stage":"upstream","state":"failed","failure":"upstream-unavailable"}
+"#,
+                )
+                .unwrap();
+        });
+        let error = wait_for_proxy_events(
+            reader,
+            Instant::now() + Duration::from_secs(1),
+            &unsafe_workload(),
+        )
+        .unwrap_err();
+        producer.join().unwrap();
+
+        assert!(error.contains("upstream-unavailable"));
+        assert!(error.contains("no direct fallback"));
+        assert!(!error.contains("wezterm"));
+        assert!(!error.contains("terminal bytes"));
+    }
+
+    #[test]
+    fn proxy_first_client_readiness_allows_window_open() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let producer = std::thread::spawn(move || {
+            for event in [
+                r#"{"protocolVersion":1,"target":"dev-general.dev.d2b","providerKind":"local-vm","stage":"upstream","state":"ready"}"#,
+                r#"{"protocolVersion":1,"target":"dev-general.dev.d2b","providerKind":"local-vm","stage":"listener","state":"ready"}"#,
+                r#"{"protocolVersion":1,"target":"dev-general.dev.d2b","providerKind":"local-vm","stage":"first-client","state":"ready"}"#,
+            ] {
+                writer.write_all(event.as_bytes()).unwrap();
+                writer.write_all(b"\n").unwrap();
+            }
+        });
+        wait_for_proxy_events(reader, Instant::now() + Duration::from_secs(1), &workload())
+            .unwrap();
+        producer.join().unwrap();
     }
 
     #[test]
@@ -653,18 +975,17 @@ mod tests {
             wezterm_command: vec!["weezterm".into(), "start".into(), "--".into()],
             ..Default::default()
         };
-        let vm = VmId::new("dev-general").unwrap();
         let shell = FriendlyName::from_candidate("quiet-otter").unwrap();
 
         assert_eq!(
-            render_terminal_command(&cfg, &vm, &shell),
+            render_terminal_command(&cfg, &workload(), &shell),
             vec![
                 "weezterm",
                 "--config",
                 "window_close_confirmation=\"NeverPrompt\"",
                 "start",
                 "--domain",
-                "d2b-dev-general",
+                "d2b-dev-general.dev.d2b",
                 "--",
             ]
         );
@@ -682,18 +1003,17 @@ mod tests {
             ],
             ..Default::default()
         };
-        let vm = VmId::new("dev-general").unwrap();
         let shell = FriendlyName::from_candidate("quiet-otter").unwrap();
 
         assert_eq!(
-            render_terminal_command(&cfg, &vm, &shell),
+            render_terminal_command(&cfg, &workload(), &shell),
             vec![
                 "weezterm",
                 "--config",
                 "window_close_confirmation=\"NeverPrompt\"",
                 "start",
                 "--domain",
-                "d2b-dev-general",
+                "d2b-dev-general.dev.d2b",
                 "--",
             ]
         );
@@ -711,18 +1031,17 @@ mod tests {
             ],
             ..Default::default()
         };
-        let vm = VmId::new("dev-general").unwrap();
         let shell = FriendlyName::from_candidate("quiet-otter").unwrap();
 
         assert_eq!(
-            render_terminal_command(&cfg, &vm, &shell),
+            render_terminal_command(&cfg, &workload(), &shell),
             vec![
                 "weezterm",
                 "--config",
                 "window_close_confirmation=\"NeverPrompt\"",
                 "start",
                 "--domain",
-                "d2b-dev-general",
+                "d2b-dev-general.dev.d2b",
                 "--",
             ]
         );

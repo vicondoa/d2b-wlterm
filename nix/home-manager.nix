@@ -49,6 +49,7 @@ let
     actions = {
       create = [ "d2b-wlterm" "create" ];
       open = [ "d2b-wlterm" "open" ];
+      detach = [ "d2b-wlterm" "detach" ];
       stop = [ "d2b-wlterm" "stop" ];
     };
   };
@@ -163,6 +164,14 @@ in
         {
           assertion = cfg.package != null;
           message = "programs.d2b-wlterm.package must be set when the module is not imported from the d2b-wlterm flake";
+        }
+        {
+          assertion = cfg.weztermCommand != [ ];
+          message = "programs.d2b-wlterm.weztermCommand must not be empty";
+        }
+        {
+          assertion = cfg.waylandProxyCommand != [ ];
+          message = "programs.d2b-wlterm.waylandProxyCommand must not be empty; direct terminal fallback is unsupported";
         }
       ];
 

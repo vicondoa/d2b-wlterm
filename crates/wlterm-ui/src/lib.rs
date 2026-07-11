@@ -13,7 +13,8 @@ use sha2::{Digest, Sha256};
 use wlterm_core::friendly_name::FriendlyName;
 use wlterm_core::{
     realm_from_canonical_target, AsyncErrorDisplay, AsyncErrorEvent as CoreAsyncErrorEvent, Model,
-    OpenBehavior, SafeCorrelation, SessionId, ShellVisualState, VmPowerState,
+    OpenBehavior, ProviderKind, SafeCorrelation, SessionId, ShellVisualState, TargetAvailability,
+    TargetPowerState, TargetRemediation,
 };
 
 pub const DISPLAY_LABEL_MAX_CHARS: usize = 40;
@@ -89,7 +90,7 @@ struct ProcessIdentity {
 }
 
 pub fn open(_config: &wlterm_core::Config) -> Result<(), String> {
-    let dir = runtime_dir();
+    let dir = runtime_dir()?;
     fs::create_dir_all(&dir).map_err(|err| format!("failed to create runtime dir: {err}"))?;
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
         .map_err(|err| format!("failed to secure runtime dir: {err}"))?;
@@ -131,13 +132,11 @@ pub fn open(_config: &wlterm_core::Config) -> Result<(), String> {
     Ok(())
 }
 
-fn runtime_dir() -> PathBuf {
+fn runtime_dir() -> Result<PathBuf, String> {
     env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
-        .or_else(|| env::var_os("TMPDIR").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("d2b-wlterm")
-        .join("quickshell")
+        .ok_or_else(|| "XDG_RUNTIME_DIR is required for the Quickshell frontend".to_string())
+        .map(|path| path.join("d2b-wlterm").join("quickshell"))
 }
 
 fn quickshell_program() -> Option<PathBuf> {
@@ -258,7 +257,7 @@ const QML_SOURCE: &str = r##"
     ShellRoot {
       id: root
       property string backend: Quickshell.env("D2B_WLTERM_BIN") || "d2b-wlterm"
-      property var state: ({ vms: [], realmGroups: [], activeShells: 0, hasError: false, errors: [] })
+      property var state: ({ workloads: [], vms: [], realmGroups: [], activeShells: 0, hasError: false, errors: [], remediation: null })
       property bool busy: false
       property string message: ""
       property string hoverHint: ""
@@ -297,7 +296,7 @@ const QML_SOURCE: &str = r##"
         if (hoverHint.length > 0) return hoverHint
         if (busy) return "working..."
         const groups = state.realmGroups || []
-        if (groups.length === 0 && (state.vms || []).length === 0) return "no shell-capable VMs"
+        if (groups.length === 0 && (state.workloads || state.vms || []).length === 0) return "no shell-capable workloads"
         return root.shellCountLabel(state.activeShells || 0, "active shell")
       }
       function shellCountLabel(count, singular) {
@@ -324,7 +323,7 @@ const QML_SOURCE: &str = r##"
         return vmAccent(fallbackVm)
       }
       function vmAccent(vm) {
-        const id = vm && (vm.id || vm.label)
+        const id = vm && (vm.legacyVmName || vm.id || vm.target || vm.label)
         const vms = theme.vms || ({})
         const envs = theme.envs || ({})
         if (id && vms[id] && vms[id].border && isHexColor(vms[id].border.active)) return vms[id].border.active
@@ -364,7 +363,7 @@ const QML_SOURCE: &str = r##"
         stdout: StdioCollector {
           onStreamFinished: {
             try { root.state = JSON.parse(this.text) }
-            catch (e) { root.state = ({ vms: [], activeShells: 0, hasError: true, errors: [{ detail: String(e) }] }) }
+            catch (e) { root.state = ({ workloads: [], vms: [], activeShells: 0, hasError: true, errors: [{ detail: String(e) }] }) }
           }
         }
         stderr: StdioCollector {}
@@ -459,10 +458,10 @@ const QML_SOURCE: &str = r##"
               Text {
                 text: {
                   const rg = root.state.realmGroups || []
-                  const vms = root.state.vms || []
+                  const workloads = root.state.workloads || root.state.vms || []
                   return rg.length > 1
-                    ? rg.length + " realms, " + vms.length + " VM(s)"
-                    : vms.length + " VM(s)"
+                    ? rg.length + " realms, " + workloads.length + " workload(s)"
+                    : workloads.length + " workload(s)"
                 }
                 color: "#ffffff"; font.pixelSize: 13; font.bold: true
               }
@@ -477,6 +476,15 @@ const QML_SOURCE: &str = r##"
               color: root.failed ? "#2e1a1a" : "#1a2e1a"
               border.color: root.failed ? "#f38ba8" : "#a6e3a1"
               Text { anchors.fill: parent; anchors.margins: 7; text: root.message; color: root.failed ? "#f38ba8" : "#a6e3a1"; font.pixelSize: 11; elide: Text.ElideRight }
+            }
+
+            Text {
+              visible: root.state.remediation !== null && root.state.remediation !== undefined
+              width: parent.width
+              text: visible ? root.state.remediation.message : ""
+              color: "#f9e2af"
+              font.pixelSize: 11
+              wrapMode: Text.WordWrap
             }
 
             Flickable {
@@ -562,18 +570,45 @@ const QML_SOURCE: &str = r##"
                               width: parent.width
                               height: 28
                               spacing: 8
-                                StatusIcon { icon: "circle"; accent: "#9399b2"; tooltip: (vm.label || vm.id) + " is shell-capable"; }
+                                StatusIcon { icon: "circle"; accent: vm.disabled ? "#f38ba8" : "#9399b2"; tooltip: (vm.label || vm.target) + " · " + vm.providerKind + " · " + vm.availability; }
                                 Text {
                                   width: parent.width - 104
                                   anchors.verticalCenter: parent.verticalCenter
-                                  text: (vm.label || vm.id) + " · " + (vm.canonicalTarget || vm.id || "") + " · " + root.shellCountLabel(vm.activeShells || 0, "shell")
+                                  text: (vm.label || vm.target) + " · " + (vm.target || vm.canonicalTarget || "") + " · " + root.shellCountLabel(vm.activeShells || 0, "shell")
                                   color: "#ffffff"
                                   font.pixelSize: 12
                                   font.bold: true
                                   elide: Text.ElideRight
                                   wrapMode: Text.NoWrap
                                 }
-                                IconButton { text: "add"; tooltip: "Create a named shell and open it"; enabled: !root.busy; onClicked: root.action(["create", vm.id]) }
+                                IconButton { text: "add"; tooltip: vm.disabled ? (vm.disabledReason || "unavailable") : "Create a named shell and open it"; enabled: !root.busy && !vm.disabled; onClicked: root.action(["create", vm.target]) }
+                              }
+
+                              Text {
+                                width: parent.width
+                                text: vm.providerKind + " · " + vm.isolationPosture + " · sessions: " + vm.sessionPersistence
+                                color: vm.isolationPosture === "unsafe-local" ? "#f38ba8" : "#9399b2"
+                                font.pixelSize: 10
+                                font.bold: vm.isolationPosture === "unsafe-local"
+                                elide: Text.ElideRight
+                              }
+
+                              Text {
+                                visible: vm.isolationPosture === "unsafe-local"
+                                width: parent.width
+                                text: "UNSAFE LOCAL · NO ISOLATION"
+                                color: "#f38ba8"
+                                font.pixelSize: 11
+                                font.bold: true
+                              }
+
+                              Text {
+                                visible: vm.disabled
+                                width: parent.width
+                                text: (vm.availability || "unavailable") + (vm.remediation ? " · " + vm.remediation.message : "")
+                                color: "#f9e2af"
+                                font.pixelSize: 10
+                                wrapMode: Text.WordWrap
                               }
 
                               Repeater {
@@ -591,8 +626,8 @@ const QML_SOURCE: &str = r##"
                                     spacing: 6
                                     StatusIcon { icon: modelData.attached ? "link" : "link_off"; accent: modelData.attached ? "#ffffff" : "#9399b2"; tooltip: modelData.attached ? "attached" : "detached"; }
                                     Text { text: modelData.name; color: "#ffffff"; font.pixelSize: 12; elide: Text.ElideRight; width: parent.width - 126; anchors.verticalCenter: parent.verticalCenter }
-                                    IconButton { text: modelData.attached ? "link_off" : "terminal"; tooltip: modelData.attached ? ("Detach " + modelData.name) : ("Attach to " + modelData.name); enabled: !root.busy; onClicked: modelData.attached ? root.action(["detach", vm.id, modelData.name]) : root.action(["open", vm.id, modelData.name]) }
-                                    IconButton { text: root.confirmKey === ("stop:" + vm.id + ":" + modelData.name) ? "priority_high" : "stop"; tooltip: "Stop " + modelData.name; accent: "#9399b2"; enabled: !root.busy; onClicked: root.confirmStop(vm.id, modelData.name) }
+                                    IconButton { text: modelData.attached ? "link_off" : "terminal"; tooltip: modelData.attached ? ("Detach " + modelData.name) : ("Attach to " + modelData.name); enabled: !root.busy && !vm.disabled; onClicked: modelData.attached ? root.action(["detach", vm.target, modelData.name]) : root.action(["open", vm.target, modelData.name]) }
+                                    IconButton { text: root.confirmKey === ("stop:" + vm.target + ":" + modelData.name) ? "priority_high" : "stop"; tooltip: "Stop " + modelData.name; accent: "#9399b2"; enabled: !root.busy && !vm.disabled; onClicked: root.confirmStop(vm.target, modelData.name) }
                                   }
                                 }
                               }
@@ -740,20 +775,24 @@ pub struct RealmGroup {
     /// Realm label extracted from the canonical target, e.g. `"dev"` or `"local"`.
     pub realm: String,
     /// Workload cards belonging to this realm, in discovery order.
-    pub workloads: Vec<VmControlCard>,
+    pub workloads: Vec<WorkloadControlCard>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlCenterState {
     /// Flat list of all shell-capable VMs (kept for backward compatibility).
-    pub vms: Vec<VmControlCard>,
-    /// VMs grouped by realm, derived from each VM's canonical target.
+    pub vms: Vec<WorkloadControlCard>,
+    /// Canonical workload list. New consumers should prefer this field.
+    pub workloads: Vec<WorkloadControlCard>,
+    /// Workloads grouped by realm, derived from each canonical target.
     /// Consumers that can use this should prefer it over the flat `vms` list.
     pub realm_groups: Vec<RealmGroup>,
     pub active_shells: usize,
     pub has_error: bool,
     pub errors: Vec<RenderedAsyncError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<TargetRemediation>,
 }
 
 impl ControlCenterState {
@@ -763,26 +802,36 @@ impl ControlCenterState {
             .iter()
             .filter_map(RenderedAsyncError::from_core)
             .collect();
-        let vms: Vec<_> = model.vms().map(VmControlCard::from_summary).collect();
-        let active_shells = vms.iter().map(|vm| vm.active_shells).sum();
-        let realm_groups = build_realm_groups(&vms);
+        let workloads: Vec<_> = model
+            .workloads()
+            .map(WorkloadControlCard::from_summary)
+            .collect();
+        let active_shells = workloads
+            .iter()
+            .map(|workload| workload.active_shells)
+            .sum();
+        let realm_groups = build_realm_groups(&workloads);
 
         Self {
-            vms,
+            vms: workloads.clone(),
+            workloads,
             realm_groups,
             active_shells,
             has_error: !errors.is_empty(),
             errors,
+            remediation: model.global_remediation(),
         }
     }
 
     pub fn empty() -> Self {
         Self {
             vms: Vec::new(),
+            workloads: Vec::new(),
             realm_groups: Vec::new(),
             active_shells: 0,
             has_error: false,
             errors: Vec::new(),
+            remediation: None,
         }
     }
 
@@ -796,21 +845,18 @@ impl ControlCenterState {
 /// VMs without a parseable realm (no canonical target, or target without a realm
 /// segment) are placed in a synthetic `"local"` group. Realm insertion order
 /// follows the order in which VMs appear in `vms`.
-fn build_realm_groups(vms: &[VmControlCard]) -> Vec<RealmGroup> {
+fn build_realm_groups(workloads: &[WorkloadControlCard]) -> Vec<RealmGroup> {
     let mut groups: Vec<RealmGroup> = Vec::new();
-    for vm in vms {
-        let realm = vm
-            .canonical_target
-            .as_deref()
-            .and_then(realm_from_canonical_target)
+    for workload in workloads {
+        let realm = realm_from_canonical_target(&workload.target)
             .unwrap_or("local")
             .to_owned();
         if let Some(group) = groups.iter_mut().find(|g| g.realm == realm) {
-            group.workloads.push(vm.clone());
+            group.workloads.push(workload.clone());
         } else {
             groups.push(RealmGroup {
                 realm,
-                workloads: vec![vm.clone()],
+                workloads: vec![workload.clone()],
             });
         }
     }
@@ -819,21 +865,32 @@ fn build_realm_groups(vms: &[VmControlCard]) -> Vec<RealmGroup> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VmControlCard {
+pub struct WorkloadControlCard {
+    pub target: String,
+    /// Legacy id retained for 0.1 frontend compatibility.
     pub id: String,
+    pub canonical_target: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub canonical_target: Option<String>,
+    pub legacy_vm_name: Option<String>,
     pub label: String,
-    pub power_state: VmPowerState,
+    pub provider_kind: ProviderKind,
+    pub isolation_posture: wlterm_core::IsolationPosture,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isolation_warning: Option<&'static str>,
+    pub session_persistence: wlterm_core::SessionPersistence,
+    pub availability: TargetAvailability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<TargetRemediation>,
+    pub power_state: TargetPowerState,
     pub disabled: bool,
     pub disabled_reason: Option<String>,
     pub active_shells: usize,
     pub shells: Vec<ShellControlRow>,
 }
 
-impl VmControlCard {
-    fn from_summary(summary: &wlterm_core::VmSummary) -> Self {
-        let disabled = !summary.power_state.is_online();
+impl WorkloadControlCard {
+    fn from_summary(summary: &wlterm_core::WorkloadSummary) -> Self {
+        let disabled = !summary.actions_available();
         let shells: Vec<_> = summary
             .sessions
             .iter()
@@ -845,21 +902,44 @@ impl VmControlCard {
             .count();
 
         Self {
+            target: summary.target.as_str().to_string(),
             id: summary.id.as_str().to_string(),
-            canonical_target: summary.canonical_target.clone(),
-            label: sanitize_display_label(summary.id.as_str()),
+            canonical_target: summary.target.as_str().to_string(),
+            legacy_vm_name: summary.legacy_vm_name.clone(),
+            label: sanitize_display_label(
+                summary
+                    .workload_name
+                    .as_deref()
+                    .unwrap_or(summary.id.as_str()),
+            ),
+            provider_kind: summary.provider_kind,
+            isolation_posture: summary.isolation_posture,
+            isolation_warning: summary.isolation_posture.warning(),
+            session_persistence: summary.session_persistence,
+            availability: summary.availability,
+            remediation: summary.remediation(),
             power_state: summary.power_state,
             disabled,
-            disabled_reason: disabled.then(|| match summary.power_state {
-                VmPowerState::Offline => "vm-offline".to_string(),
-                VmPowerState::Unknown => "vm-state-unknown".to_string(),
-                VmPowerState::Online => "disabled".to_string(),
+            disabled_reason: disabled.then(|| {
+                if !summary.shell_feature_available {
+                    "update-required".to_string()
+                } else if !summary.availability.is_ready() {
+                    summary.availability.metrics_label_value().to_string()
+                } else {
+                    match summary.power_state {
+                        TargetPowerState::Offline => "target-offline".to_string(),
+                        TargetPowerState::Unknown => "target-state-unknown".to_string(),
+                        TargetPowerState::Online => "disabled".to_string(),
+                    }
+                }
             }),
             active_shells,
             shells,
         }
     }
 }
+
+pub type VmControlCard = WorkloadControlCard;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1102,7 +1182,7 @@ mod tests {
     use super::*;
     use wlterm_core::friendly_name::FriendlyName;
     use wlterm_core::{
-        Config, ModelEvent, PlannedAction, ShellSession, UserIntent, VmId, VmSummary,
+        Config, ModelEvent, PlannedAction, ShellSession, UserIntent, VmId, VmPowerState, VmSummary,
     };
 
     fn vm(name: &str) -> VmId {
@@ -1111,6 +1191,12 @@ mod tests {
 
     fn shell(name: &str) -> FriendlyName {
         FriendlyName::from_candidate(name).unwrap()
+    }
+
+    fn workload(target: &str, legacy: &str, power: VmPowerState) -> VmSummary {
+        let mut summary = VmSummary::discovered(vm(target), vm(legacy), power);
+        summary.legacy_vm_name = Some(legacy.to_string());
+        summary
     }
 
     #[test]
@@ -1215,21 +1301,23 @@ mod tests {
         });
 
         assert_eq!(
-            model.plan(UserIntent::ListSessions { vm: work }),
+            model.plan(UserIntent::ListSessions { target: work }),
             PlannedAction::Disabled {
-                reason: wlterm_core::DisabledReason::VmOffline
+                reason: wlterm_core::DisabledReason::TargetOffline
             }
         );
 
         let state = ControlCenterState::from_model(&model);
         assert!(state.vms[0].disabled);
-        assert_eq!(state.vms[0].disabled_reason.as_deref(), Some("vm-offline"));
+        assert_eq!(
+            state.vms[0].disabled_reason.as_deref(),
+            Some("target-offline")
+        );
     }
 
     #[test]
     fn control_center_counts_active_shells_and_renders_errors() {
-        let mut summary = VmSummary::new(vm("work"), VmPowerState::Online);
-        summary.canonical_target = Some("work.example.d2b".to_string());
+        let mut summary = workload("work.example.d2b", "work", VmPowerState::Online);
         summary
             .sessions
             .push(ShellSession::attached(shell("quiet-otter")));
@@ -1245,10 +1333,7 @@ mod tests {
 
         let state = ControlCenterState::from_model(&model);
         assert_eq!(state.active_shells, 2);
-        assert_eq!(
-            state.vms[0].canonical_target.as_deref(),
-            Some("work.example.d2b")
-        );
+        assert_eq!(state.vms[0].canonical_target, "work.example.d2b");
         assert!(state.to_json().contains("\"canonicalTarget\""));
         assert!(state.has_error);
         assert_eq!(state.errors[0].title, "d2b-wlterm action failed");
@@ -1256,15 +1341,64 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_local_card_shows_provider_posture_persistence_and_remediation() {
+        let mut unsafe_local = workload("tools.host.d2b", "tools", VmPowerState::Unknown);
+        unsafe_local.provider_kind = ProviderKind::UnsafeLocal;
+        unsafe_local.isolation_posture = wlterm_core::IsolationPosture::UnsafeLocal;
+        unsafe_local.session_persistence = wlterm_core::SessionPersistence::UserManagerLifetime;
+        unsafe_local.availability = TargetAvailability::HelperUnavailable;
+
+        let mut model = Model::new(Config::default());
+        model.apply(ModelEvent::WorkloadSnapshot {
+            workloads: vec![unsafe_local],
+        });
+        let state = ControlCenterState::from_model(&model);
+        let card = &state.workloads[0];
+
+        assert_eq!(card.target, "tools.host.d2b");
+        assert_eq!(card.provider_kind, ProviderKind::UnsafeLocal);
+        assert_eq!(
+            card.isolation_warning,
+            Some("No isolation: runs in the host user session")
+        );
+        assert_eq!(
+            card.session_persistence,
+            wlterm_core::SessionPersistence::UserManagerLifetime
+        );
+        assert_eq!(
+            card.remediation.unwrap().kind,
+            wlterm_core::RemediationKind::RestartHelper
+        );
+        let json = state.to_json();
+        assert!(json.contains("\"providerKind\":\"unsafe-local\""));
+        assert!(json.contains("\"isolationPosture\":\"unsafe-local\""));
+        assert!(json.contains("\"sessionPersistence\":\"user-manager-lifetime\""));
+        assert!(QML_SOURCE.contains("UNSAFE LOCAL · NO ISOLATION"));
+        assert!(QML_SOURCE.contains("[\"create\", vm.target]"));
+    }
+
+    #[test]
+    fn feature_skew_remediation_is_visible_without_inventory_rows() {
+        let mut model = Model::new(Config::default());
+        model.apply(ModelEvent::GlobalRemediation {
+            remediation: TargetRemediation {
+                kind: wlterm_core::RemediationKind::UpdateD2b,
+                message: "Update d2b components together",
+            },
+        });
+        let state = ControlCenterState::from_model(&model);
+        assert_eq!(
+            state.remediation.unwrap().kind,
+            wlterm_core::RemediationKind::UpdateD2b
+        );
+        assert!(state.to_json().contains("Update d2b components together"));
+    }
+
+    #[test]
     fn realm_groups_are_built_from_canonical_targets() {
-        let mut dev_vm = VmSummary::new(vm("dev-general"), VmPowerState::Online);
-        dev_vm.canonical_target = Some("dev-general.dev.d2b".to_string());
-
-        let mut work_vm = VmSummary::new(vm("work-aad"), VmPowerState::Online);
-        work_vm.canonical_target = Some("work-aad.corp.d2b".to_string());
-
-        let mut dev_vm2 = VmSummary::new(vm("dev-media"), VmPowerState::Online);
-        dev_vm2.canonical_target = Some("dev-media.dev.d2b".to_string());
+        let dev_vm = workload("dev-general.dev.d2b", "dev-general", VmPowerState::Online);
+        let work_vm = workload("work-aad.corp.d2b", "work-aad", VmPowerState::Online);
+        let dev_vm2 = workload("dev-media.dev.d2b", "dev-media", VmPowerState::Online);
 
         let mut model = Model::new(Config::default());
         model.apply(ModelEvent::VmSnapshot {
@@ -1294,12 +1428,9 @@ mod tests {
     }
 
     #[test]
-    fn vms_without_canonical_target_fall_into_local_realm() {
-        let mut no_target = VmSummary::new(vm("home-general"), VmPowerState::Online);
-        no_target.canonical_target = None;
-
-        let mut local_vm = VmSummary::new(vm("home-media"), VmPowerState::Online);
-        local_vm.canonical_target = Some("home-media.local.d2b".to_string());
+    fn legacy_and_canonical_local_targets_share_local_realm() {
+        let no_target = VmSummary::new(vm("home-general"), VmPowerState::Online);
+        let local_vm = workload("home-media.local.d2b", "home-media", VmPowerState::Online);
 
         let mut model = Model::new(Config::default());
         model.apply(ModelEvent::VmSnapshot {
@@ -1318,14 +1449,9 @@ mod tests {
     fn realm_groups_preserve_discovery_order_across_realms() {
         // VMs are stored in a BTreeMap keyed by VmId, so they are returned in
         // lexicographic order: corp-b < dev-a < home-c → realm order: corp, dev, home.
-        let mut dev = VmSummary::new(vm("dev-a"), VmPowerState::Online);
-        dev.canonical_target = Some("dev-a.dev.d2b".to_string());
-
-        let mut corp = VmSummary::new(vm("corp-b"), VmPowerState::Online);
-        corp.canonical_target = Some("corp-b.corp.d2b".to_string());
-
-        let mut home = VmSummary::new(vm("home-c"), VmPowerState::Online);
-        home.canonical_target = Some("home-c.home.d2b".to_string());
+        let dev = workload("dev-a.dev.d2b", "dev-a", VmPowerState::Online);
+        let corp = workload("corp-b.corp.d2b", "corp-b", VmPowerState::Online);
+        let home = workload("home-c.home.d2b", "home-c", VmPowerState::Online);
 
         let mut model = Model::new(Config::default());
         model.apply(ModelEvent::VmSnapshot {

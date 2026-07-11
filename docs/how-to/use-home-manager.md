@@ -13,7 +13,7 @@ Add the flake input and import the module:
     };
 
     d2b-toolkit = {
-      url = "github:vicondoa/d2b-toolkit";
+      url = "github:vicondoa/d2b-toolkit/fde6af8b842718e7150f5056d4eba73093d4ad77";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -61,6 +61,12 @@ Waybar module snippet at `d2b-wlterm/waybar-module.json`, and injects the custom
 Waybar module when Home Manager also manages Waybar. Enable
 `quickshell.enable` to render the control-center surface description at
 `d2b-wlterm/quickshell-control-center.json`.
+
+The toolkit pin is release 0.2.0. Keep WezTerm and other desktop companions
+following the same toolkit input. Ensure `d2b-wayland-proxy` is on the
+user-session `PATH`, or set `waylandProxyCommand` to its absolute package path.
+A missing or unready proxy fails terminal open without a direct Wayland
+fallback.
 
 Use `defaultOpenBehavior = "prompt"` or `"force-open"` if focusing an existing
 attached terminal should not be the default. Use `asyncErrorDisplay = "inline"`

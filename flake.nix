@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     d2b-toolkit = {
-      url = "github:vicondoa/d2b-toolkit";
+      url = "github:vicondoa/d2b-toolkit/fde6af8b842718e7150f5056d4eba73093d4ad77";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -13,6 +13,7 @@
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
+      version = "0.2.0";
     in
     {
       packages = forAllSystems (system:
@@ -23,7 +24,7 @@
         {
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "d2b-wlterm";
-            version = "0.1.0-dev";
+            inherit version;
             src = pkgs.lib.cleanSource ./.;
             postPatch = ''
               substituteInPlace Cargo.toml \
@@ -92,11 +93,20 @@
           };
         in {
           package = self.packages.${system}.default;
-          home-manager-module = pkgs.runCommand "d2b-wlterm-home-manager-module" { } ''
+          release-metadata = pkgs.runCommand "d2b-wlterm-release-metadata-${version}" { } ''
+            grep -Fq 'version = "0.2.0"' ${./Cargo.toml}
+            grep -Fq '## [0.2.0] - 2026-07-11' ${./CHANGELOG.md}
+            grep -Fq 'fde6af8b842718e7150f5056d4eba73093d4ad77' ${./Cargo.toml}
+            grep -Fq 'fde6af8b842718e7150f5056d4eba73093d4ad77' ${./flake.lock}
+            touch $out
+          '';
+          home-manager-module = pkgs.runCommand "d2b-wlterm-home-manager-module-${version}" { } ''
             test -n "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q 'public_socket_path = "/run/d2b/public.sock"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q 'wezterm_command = \[' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q '"weezterm"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
+            grep -q 'wayland_proxy_command = \[' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
+            grep -q '"d2b-wayland-proxy"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q 'default_open_behavior = "force-open"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q 'module_name = "custom/d2b-wlterm"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q 'control_center_state_path = "$XDG_RUNTIME_DIR/d2b-wlterm/control-center.json"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
@@ -108,9 +118,18 @@
               | grep -q '"modules-right":\["clock","custom/d2b-wlterm"\]'
             printf '%s' '${hmEval.config.xdg.configFile."d2b-wlterm/quickshell-control-center.json".text}' \
               | grep -q '"statePath"'
+            printf '%s' '${hmEval.config.xdg.configFile."d2b-wlterm/quickshell-control-center.json".text}' \
+              | grep -q '"detach"'
             touch $out
           '';
         });
+
+      apps = forAllSystems (system: {
+        default = {
+          type = "app";
+          program = "${self.packages.${system}.default}/bin/d2b-wlterm";
+        };
+      });
 
       devShells = forAllSystems (system:
         let pkgs = import nixpkgs { inherit system; };

@@ -23,9 +23,10 @@ enable = false
 control_center_state_path = "$XDG_RUNTIME_DIR/d2b-wlterm/control-center.json"
 ```
 
-`wezterm_command` must launch WeezTerm. `d2b-wlterm create` and
-`d2b-wlterm open` wrap that command with `wayland_proxy_command` so terminal
-windows receive the d2b Wayland proxy VM rail and clipboard policy.
+`wezterm_command` is the only supported terminal backend.
+`wayland_proxy_command` must name a d2b-wayland-proxy build with typed readiness
+support. `create` and `open` wait for first-client readiness; failure terminates
+the proxy and never starts WezTerm directly.
 
 `ui.default_open_behavior` accepts:
 
@@ -37,22 +38,21 @@ windows receive the d2b Wayland proxy VM rail and clipboard policy.
 `silent`. Async d2b client failures include a bounded trace/correlation id and
 must not display raw shell names, opaque daemon handles, or terminal bytes.
 
-Offline VMs remain visible but shell list, create, and open actions are disabled
-in the core planner.
+Unavailable workloads remain visible. Cards include provider kind, isolation
+posture, session persistence, availability, and typed remediation. Unsafe-local
+cards warn that they provide no isolation and remain disabled unless
+`unsafe-local-shell-v1` was negotiated.
 
 Waybar output is a JSON custom-module payload with `text`, `tooltip`, and
-`class`. The button text includes the active shell count and switches to an
-error class whenever a renderable async error exists.
+`class`. The tooltip includes an explicit no-isolation warning when unsafe-local
+workloads are present.
 
-Control-center state is frontend-neutral JSON for Quickshell or similar shells.
-It contains VM cards, sanitized shell labels, available actions, active-shell
-counts, and safe async-error render data. Labels strip control and ANSI escape
-characters, truncate long text, and use `unnamed-shell` for empty labels.
+Control-center state is frontend-neutral JSON. It contains canonical workload
+cards plus legacy `vms`/`id` compatibility fields, sanitized shell labels,
+available actions, active-shell counts, and safe async-error data.
 
 ## Flake/Home Manager coverage
 
-The Home Manager module renders this TOML shape directly. The flake exports a
-`checks.<system>.home-manager-module` evaluation check that enables the module,
-sets `defaultOpenBehavior = "force-open"`, enables Waybar output, and asserts
-that the generated config still contains the `wezterm_command`, UI, and Waybar
-keys documented here.
+The flake's package and Home Manager checks use release version 0.2.0. The
+module check evaluates generated TOML, Waybar, and Quickshell output without
+starting d2b.
