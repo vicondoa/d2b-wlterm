@@ -26,7 +26,7 @@ use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::path::Path;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use wlterm_core::friendly_name::FriendlyName;
 use wlterm_core::{
     DisabledReason, IsolationPosture, PlannedAction, ProviderKind, SafeCorrelation,
@@ -587,15 +587,35 @@ fn connect_seqpacket(path: &str, connect_timeout: Duration) -> io::Result<OwnedF
     let addr = UnixAddr::new(Path::new(path)).map_err(errno_to_io)?;
     match connect(fd.as_raw_fd(), &addr) {
         Ok(()) | Err(Errno::EISCONN) => {}
-        Err(Errno::EINPROGRESS) | Err(Errno::EALREADY) | Err(Errno::EAGAIN) => {
-            let mut pollfd = [PollFd::new(fd.as_fd(), PollFlags::POLLOUT)];
-            let timeout = PollTimeout::try_from(connect_timeout)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-            if poll(&mut pollfd, timeout).map_err(errno_to_io)? == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "timed out connecting to d2bd public socket",
-                ));
+        Err(Errno::EINPROGRESS | Errno::EALREADY | Errno::EAGAIN | Errno::EINTR) => {
+            let deadline = Instant::now().checked_add(connect_timeout).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "d2bd connect timeout exceeds the supported range",
+                )
+            })?;
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "timed out connecting to d2bd public socket",
+                    ));
+                }
+                let timeout = PollTimeout::try_from(remaining)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+                let mut pollfd = [PollFd::new(fd.as_fd(), PollFlags::POLLOUT)];
+                match poll(&mut pollfd, timeout) {
+                    Ok(0) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "timed out connecting to d2bd public socket",
+                        ));
+                    }
+                    Ok(_) => break,
+                    Err(Errno::EINTR) => continue,
+                    Err(error) => return Err(errno_to_io(error)),
+                }
             }
             let socket_error = getsockopt(&fd, sockopt::SocketError).map_err(errno_to_io)?;
             if socket_error != 0 {

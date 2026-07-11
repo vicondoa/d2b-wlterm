@@ -41,6 +41,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   compositor fallback.
 - Public-socket operations use a non-blocking reactor transport with bounded
   operation deadlines, reusable packet buffers, and interrupted-syscall retries;
-  proxy readiness frames are size- and deadline-bound.
+  connect polling preserves its absolute deadline across signals, and proxy
+  readiness frames are size- and deadline-bound.
 - Errors and diagnostics omit opaque handles, terminal bytes, argv, environment,
   cwd, private paths, and raw target identifiers.
