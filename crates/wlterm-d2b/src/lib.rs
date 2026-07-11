@@ -616,6 +616,7 @@ const MAX_PUBLIC_PACKET: usize = 1024 * 1024 + 4;
 pub struct BlockingUnixTransport {
     fd: Async<OwnedFd>,
     read_buf: Vec<u8>,
+    read_len: usize,
     read_pos: usize,
     write_buf: Vec<u8>,
 }
@@ -624,7 +625,8 @@ impl BlockingUnixTransport {
     fn connect(path: &str, timeout: Duration) -> io::Result<Self> {
         Ok(Self {
             fd: Async::new(connect_seqpacket(path, timeout)?)?,
-            read_buf: Vec::new(),
+            read_buf: vec![0_u8; MAX_PUBLIC_PACKET],
+            read_len: 0,
             read_pos: 0,
             write_buf: Vec::new(),
         })
@@ -637,26 +639,25 @@ impl AsyncRead for BlockingUnixTransport {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        if self.read_pos >= self.read_buf.len() {
+        if self.read_pos >= self.read_len {
             loop {
-                let mut packet = vec![0_u8; MAX_PUBLIC_PACKET];
+                let fd = self.fd.get_ref().as_raw_fd();
                 match nix::sys::socket::recv(
-                    self.fd.get_ref().as_raw_fd(),
-                    &mut packet,
+                    fd,
+                    &mut self.read_buf,
                     nix::sys::socket::MsgFlags::MSG_DONTWAIT
                         | nix::sys::socket::MsgFlags::MSG_TRUNC,
                 ) {
-                    Ok(len) if len > packet.len() => {
+                    Ok(len) if len > self.read_buf.len() => {
                         return Poll::Ready(Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             "d2bd public socket packet exceeded the frame bound",
                         )));
                     }
                     Ok(len) => {
-                        packet.truncate(len);
-                        self.read_buf = packet;
+                        self.read_len = len;
                         self.read_pos = 0;
-                        if self.read_buf.is_empty() {
+                        if self.read_len == 0 {
                             return Poll::Ready(Ok(0));
                         }
                         break;
@@ -666,11 +667,12 @@ impl AsyncRead for BlockingUnixTransport {
                         Poll::Ready(Ok(())) => continue,
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                     },
+                    Err(nix::errno::Errno::EINTR) => continue,
                     Err(error) => return Poll::Ready(Err(errno_to_io(error))),
                 }
             }
         }
-        let available = &self.read_buf[self.read_pos..];
+        let available = &self.read_buf[self.read_pos..self.read_len];
         let len = available.len().min(buf.len());
         buf[..len].copy_from_slice(&available[..len]);
         self.read_pos += len;
@@ -713,6 +715,7 @@ impl AsyncWrite for BlockingUnixTransport {
                     Poll::Ready(Ok(())) => continue,
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 },
+                Err(nix::errno::Errno::EINTR) => continue,
                 Err(error) => return Poll::Ready(Err(errno_to_io(error))),
             }
         }

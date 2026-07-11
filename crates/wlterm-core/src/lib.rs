@@ -166,7 +166,7 @@ impl TargetId {
 
 impl fmt::Debug for TargetId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("TargetId").field(&self.0).finish()
+        f.debug_tuple("TargetId").field(&"<redacted>").finish()
     }
 }
 
@@ -1238,6 +1238,14 @@ mod tests {
         let session = SessionId::new("quiet-otter").expect("session");
         let rendered = format!("{session:?}");
         assert!(!rendered.contains("quiet-otter"));
+        assert!(rendered.contains("redacted"));
+    }
+
+    #[test]
+    fn target_id_debug_is_redacted() {
+        let target = TargetId::new("tools.host.d2b").expect("target");
+        let rendered = format!("{target:?}");
+        assert!(!rendered.contains("tools.host.d2b"));
         assert!(rendered.contains("redacted"));
     }
 

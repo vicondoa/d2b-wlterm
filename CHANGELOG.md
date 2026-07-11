@@ -40,6 +40,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Terminal windows fail closed when proxy readiness fails; there is no direct
   compositor fallback.
 - Public-socket operations use a non-blocking reactor transport with bounded
-  operation deadlines, and proxy readiness frames are size- and deadline-bound.
+  operation deadlines, reusable packet buffers, and interrupted-syscall retries;
+  proxy readiness frames are size- and deadline-bound.
 - Errors and diagnostics omit opaque handles, terminal bytes, argv, environment,
-  cwd, and private paths.
+  cwd, private paths, and raw target identifiers.
