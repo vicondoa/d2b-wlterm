@@ -389,24 +389,9 @@ fn wait_for_proxy_events(
     deadline: Instant,
     workload: &WorkloadSummary,
 ) -> Result<(), String> {
-    stream
-        .set_read_timeout(Some(deadline.saturating_duration_since(Instant::now())))
-        .map_err(|_| "failed to configure proxy readiness deadline".to_string())?;
     let mut reader = BufReader::new(stream);
     loop {
-        let mut line = String::new();
-        let read = reader.read_line(&mut line).map_err(|_| {
-            "d2b-wayland-proxy readiness channel failed; no direct fallback".to_string()
-        })?;
-        if read == 0 {
-            return Err(
-                "d2b-wayland-proxy closed before terminal readiness; no direct fallback"
-                    .to_string(),
-            );
-        }
-        if read > MAX_READINESS_EVENT_BYTES {
-            return Err("d2b-wayland-proxy readiness event exceeded its bound".to_string());
-        }
+        let line = read_bounded_proxy_event(&mut reader, deadline)?;
         let event: ProxyReadinessEvent = serde_json::from_str(line.trim_end())
             .map_err(|_| "d2b-wayland-proxy sent an invalid readiness event".to_string())?;
         event.validate_for(workload)?;
@@ -426,6 +411,53 @@ fn wait_for_proxy_events(
         }
         if Instant::now() >= deadline {
             return Err("d2b-wayland-proxy readiness timed out; no direct fallback".to_string());
+        }
+    }
+}
+
+fn read_bounded_proxy_event(
+    reader: &mut BufReader<UnixStream>,
+    deadline: Instant,
+) -> Result<String, String> {
+    let mut line = Vec::with_capacity(MAX_READINESS_EVENT_BYTES.min(1024));
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("d2b-wayland-proxy readiness timed out; no direct fallback".to_string());
+        }
+        reader
+            .get_ref()
+            .set_read_timeout(Some(remaining))
+            .map_err(|_| "failed to configure proxy readiness deadline".to_string())?;
+        let available = reader.fill_buf().map_err(|error| {
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) {
+                "d2b-wayland-proxy readiness timed out; no direct fallback".to_string()
+            } else {
+                "d2b-wayland-proxy readiness channel failed; no direct fallback".to_string()
+            }
+        })?;
+        if available.is_empty() {
+            return Err(
+                "d2b-wayland-proxy closed before terminal readiness; no direct fallback"
+                    .to_string(),
+            );
+        }
+        let chunk_len = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position + 1);
+        if line.len().saturating_add(chunk_len) > MAX_READINESS_EVENT_BYTES {
+            return Err("d2b-wayland-proxy readiness event exceeded its bound".to_string());
+        }
+        let complete = available[chunk_len - 1] == b'\n';
+        line.extend_from_slice(&available[..chunk_len]);
+        reader.consume(chunk_len);
+        if complete {
+            return String::from_utf8(line)
+                .map_err(|_| "d2b-wayland-proxy sent an invalid readiness event".to_string());
         }
     }
 }
@@ -967,6 +999,36 @@ mod tests {
         wait_for_proxy_events(reader, Instant::now() + Duration::from_secs(1), &workload())
             .unwrap();
         producer.join().unwrap();
+    }
+
+    #[test]
+    fn proxy_readiness_rejects_an_unterminated_oversized_event() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let producer = std::thread::spawn(move || {
+            writer
+                .write_all(&vec![b'a'; MAX_READINESS_EVENT_BYTES + 1])
+                .unwrap();
+        });
+        let error = read_bounded_proxy_event(
+            &mut BufReader::new(reader),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap_err();
+        producer.join().unwrap();
+        assert!(error.contains("exceeded its bound"), "{error}");
+    }
+
+    #[test]
+    fn proxy_readiness_uses_one_absolute_deadline() {
+        let (reader, _writer) = UnixStream::pair().unwrap();
+        let started = Instant::now();
+        let error = read_bounded_proxy_event(
+            &mut BufReader::new(reader),
+            started + Duration::from_millis(25),
+        )
+        .unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

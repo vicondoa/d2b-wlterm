@@ -4,6 +4,7 @@
 //! plans through `wlterm-core`, executes through `d2b-client`, and never talks
 //! to the privileged broker or mutates host state directly.
 
+use async_io::Async;
 use d2b_client::{
     read_hello_response, send_hello, AttachedShell, ClientError, FrameBounds, PublicSocketClient,
 };
@@ -15,11 +16,13 @@ use d2b_toolkit_core::{
     WorkloadPublicSummary, WorkloadState,
 };
 use futures::executor::block_on;
+use futures::future::{select, Either};
 use futures::io::{AsyncRead, AsyncWrite};
 use sha2::{Digest, Sha256};
 use std::fmt;
+use std::future::Future;
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::path::Path;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -64,6 +67,26 @@ impl D2bActionBoundary {
 
     pub fn config(&self) -> &D2bClientConfig {
         &self.config
+    }
+
+    fn block_on_operation<F, T>(
+        &self,
+        action: &'static str,
+        trace: ActionTrace,
+        operation: F,
+    ) -> Result<T, D2bClientError>
+    where
+        F: Future<Output = Result<T, D2bClientError>>,
+    {
+        let timeout = Duration::from_millis(self.config.operation_timeout_ms);
+        block_on(async {
+            let operation = Box::pin(operation);
+            let timer = Box::pin(async_io::Timer::after(timeout));
+            match select(operation, timer).await {
+                Either::Left((result, _)) => result,
+                Either::Right(_) => Err(D2bClientError::timeout(action, trace)),
+            }
+        })
     }
 
     pub fn plan_to_shell_op(&self, action: &PlannedAction) -> Option<ShellOp> {
@@ -123,7 +146,7 @@ impl D2bActionBoundary {
                 },
             )?;
         let bounds = FrameBounds::default();
-        let response = block_on(async {
+        let response = self.block_on_operation("connect", trace.clone(), async {
             send_hello(
                 &mut transport,
                 &Hello::toolkit_client(vec![
@@ -134,10 +157,12 @@ impl D2bActionBoundary {
                 ]),
                 bounds,
             )
-            .await?;
-            read_hello_response(&mut transport, bounds).await
-        })
-        .map_err(|err| D2bClientError::from_client_error("connect", trace, err))?;
+            .await
+            .map_err(|error| D2bClientError::from_client_error("connect", trace.clone(), error))?;
+            read_hello_response(&mut transport, bounds)
+                .await
+                .map_err(|error| D2bClientError::from_client_error("connect", trace, error))
+        })?;
         let HelloResponse::HelloOk(hello) = response else {
             return Err(D2bClientError::protocol(
                 "connect",
@@ -154,13 +179,21 @@ impl D2bActionBoundary {
 
     pub fn inventory_blocking(&self) -> Result<Vec<WorkloadSummary>, D2bClientError> {
         let client = self.connect()?;
-        let outcome = block_on(self.inventory_with_client(client))?;
+        let outcome = self.block_on_operation(
+            "inventory",
+            ActionTrace::for_label("workload-inventory"),
+            self.inventory_with_client(client),
+        )?;
         Ok(outcome.workloads)
     }
 
     pub fn discover_blocking(&self) -> Result<Vec<WorkloadSummary>, D2bClientError> {
         let client = self.connect()?;
-        let outcome = block_on(self.discover_with_client(client))?;
+        let outcome = self.block_on_operation(
+            "inventory",
+            ActionTrace::for_label("workload-inventory"),
+            self.discover_with_client(client),
+        )?;
         Ok(outcome.workloads)
     }
 
@@ -245,7 +278,12 @@ impl D2bActionBoundary {
         action: PlannedAction,
     ) -> Result<D2bActionOutcome<BlockingUnixTransport>, D2bClientError> {
         let client = self.connect()?;
-        block_on(self.execute_with_client(client, action))
+        let action_label = action.metrics_label_value();
+        self.block_on_operation(
+            action_label,
+            ActionTrace::for_label(action_label),
+            self.execute_with_client(client, action),
+        )
     }
 
     pub async fn execute_with_client<T>(
@@ -532,18 +570,40 @@ fn availability_from_shell_error(error: &ClientError) -> Option<TargetAvailabili
     })
 }
 
-fn connect_seqpacket(path: &str) -> io::Result<OwnedFd> {
-    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, UnixAddr};
+fn connect_seqpacket(path: &str, connect_timeout: Duration) -> io::Result<OwnedFd> {
+    use nix::errno::Errno;
+    use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+    use nix::sys::socket::{
+        connect, getsockopt, socket, sockopt, AddressFamily, SockFlag, SockType, UnixAddr,
+    };
 
     let fd = socket(
         AddressFamily::Unix,
         SockType::SeqPacket,
-        SockFlag::SOCK_CLOEXEC,
+        SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
         None,
     )
     .map_err(errno_to_io)?;
     let addr = UnixAddr::new(Path::new(path)).map_err(errno_to_io)?;
-    connect(fd.as_raw_fd(), &addr).map_err(errno_to_io)?;
+    match connect(fd.as_raw_fd(), &addr) {
+        Ok(()) | Err(Errno::EISCONN) => {}
+        Err(Errno::EINPROGRESS) | Err(Errno::EALREADY) | Err(Errno::EAGAIN) => {
+            let mut pollfd = [PollFd::new(fd.as_fd(), PollFlags::POLLOUT)];
+            let timeout = PollTimeout::try_from(connect_timeout)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            if poll(&mut pollfd, timeout).map_err(errno_to_io)? == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out connecting to d2bd public socket",
+                ));
+            }
+            let socket_error = getsockopt(&fd, sockopt::SocketError).map_err(errno_to_io)?;
+            if socket_error != 0 {
+                return Err(io::Error::from_raw_os_error(socket_error));
+            }
+        }
+        Err(error) => return Err(errno_to_io(error)),
+    }
     Ok(fd)
 }
 
@@ -554,16 +614,16 @@ fn errno_to_io(error: nix::errno::Errno) -> io::Error {
 const MAX_PUBLIC_PACKET: usize = 1024 * 1024 + 4;
 
 pub struct BlockingUnixTransport {
-    fd: OwnedFd,
+    fd: Async<OwnedFd>,
     read_buf: Vec<u8>,
     read_pos: usize,
     write_buf: Vec<u8>,
 }
 
 impl BlockingUnixTransport {
-    fn connect(path: &str, _timeout: Duration) -> io::Result<Self> {
+    fn connect(path: &str, timeout: Duration) -> io::Result<Self> {
         Ok(Self {
-            fd: connect_seqpacket(path)?,
+            fd: Async::new(connect_seqpacket(path, timeout)?)?,
             read_buf: Vec::new(),
             read_pos: 0,
             write_buf: Vec::new(),
@@ -574,22 +634,40 @@ impl BlockingUnixTransport {
 impl AsyncRead for BlockingUnixTransport {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         if self.read_pos >= self.read_buf.len() {
-            let mut packet = vec![0_u8; MAX_PUBLIC_PACKET];
-            let len = nix::sys::socket::recv(
-                self.fd.as_raw_fd(),
-                &mut packet,
-                nix::sys::socket::MsgFlags::empty(),
-            )
-            .map_err(errno_to_io)?;
-            packet.truncate(len);
-            self.read_buf = packet;
-            self.read_pos = 0;
-            if self.read_buf.is_empty() {
-                return Poll::Ready(Ok(0));
+            loop {
+                let mut packet = vec![0_u8; MAX_PUBLIC_PACKET];
+                match nix::sys::socket::recv(
+                    self.fd.get_ref().as_raw_fd(),
+                    &mut packet,
+                    nix::sys::socket::MsgFlags::MSG_DONTWAIT
+                        | nix::sys::socket::MsgFlags::MSG_TRUNC,
+                ) {
+                    Ok(len) if len > packet.len() => {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "d2bd public socket packet exceeded the frame bound",
+                        )));
+                    }
+                    Ok(len) => {
+                        packet.truncate(len);
+                        self.read_buf = packet;
+                        self.read_pos = 0;
+                        if self.read_buf.is_empty() {
+                            return Poll::Ready(Ok(0));
+                        }
+                        break;
+                    }
+                    Err(nix::errno::Errno::EAGAIN) => match self.fd.poll_readable(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Ok(())) => continue,
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    },
+                    Err(error) => return Poll::Ready(Err(errno_to_io(error))),
+                }
             }
         }
         let available = &self.read_buf[self.read_pos..];
@@ -606,25 +684,37 @@ impl AsyncWrite for BlockingUnixTransport {
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        if self.write_buf.len().saturating_add(buf.len()) > MAX_PUBLIC_PACKET {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "d2bd public socket packet exceeded the frame bound",
+            )));
+        }
         self.write_buf.extend_from_slice(buf);
         Poll::Ready(Ok(buf.len()))
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if !self.write_buf.is_empty() {
-            let sent = nix::sys::socket::send(
-                self.fd.as_raw_fd(),
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        while !self.write_buf.is_empty() {
+            match nix::sys::socket::send(
+                self.fd.get_ref().as_raw_fd(),
                 &self.write_buf,
-                nix::sys::socket::MsgFlags::empty(),
-            )
-            .map_err(errno_to_io)?;
-            if sent != self.write_buf.len() {
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "short write on public seqpacket socket",
-                )));
+                nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+            ) {
+                Ok(sent) if sent == self.write_buf.len() => self.write_buf.clear(),
+                Ok(_) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "short write on public seqpacket socket",
+                    )));
+                }
+                Err(nix::errno::Errno::EAGAIN) => match self.fd.poll_writable(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok(())) => continue,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                },
+                Err(error) => return Poll::Ready(Err(errno_to_io(error))),
             }
-            self.write_buf.clear();
         }
         Poll::Ready(Ok(()))
     }
@@ -763,6 +853,15 @@ impl D2bClientError {
         Self {
             action,
             kind: D2bClientErrorKind::Protocol(kind),
+            trace,
+            source: None,
+        }
+    }
+
+    fn timeout(action: &'static str, trace: ActionTrace) -> Self {
+        Self {
+            action,
+            kind: D2bClientErrorKind::Timeout,
             trace,
             source: None,
         }
@@ -1700,6 +1799,25 @@ mod tests {
             D2bClientConfig::default().public_socket_path,
             "/run/d2b/public.sock"
         );
+    }
+
+    #[test]
+    fn operation_timeout_bounds_a_stalled_async_transport() {
+        let boundary = D2bActionBoundary::new(D2bClientConfig {
+            operation_timeout_ms: 20,
+            ..D2bClientConfig::default()
+        });
+        let started = std::time::Instant::now();
+        let result = boundary.block_on_operation(
+            "test",
+            ActionTrace::for_label("timeout-test"),
+            futures::future::pending::<Result<(), D2bClientError>>(),
+        );
+        assert!(matches!(
+            result.unwrap_err().kind(),
+            D2bClientErrorKind::Timeout
+        ));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

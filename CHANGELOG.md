@@ -29,8 +29,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   invokes CLI subprocesses or reads host-private artifacts.
 - Terminal models and actions use canonical workload targets while retaining
   legacy VM JSON fields and aliases for compatibility.
-- d2b-toolkit is pinned to version 0.2.0 at revision
-  release tag `v0.2.0` (locked to
+- d2b-toolkit is pinned to release tag `v0.2.0` (locked to
   `fde6af8b842718e7150f5056d4eba73093d4ad77`).
 - All workspace crates and flake package outputs are version 0.2.0.
 
@@ -40,5 +39,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   never fall back to a host shell, SSH, helper socket, broker, or private state.
 - Terminal windows fail closed when proxy readiness fails; there is no direct
   compositor fallback.
+- Public-socket operations use a non-blocking reactor transport with bounded
+  operation deadlines, and proxy readiness frames are size- and deadline-bound.
 - Errors and diagnostics omit opaque handles, terminal bytes, argv, environment,
   cwd, and private paths.
