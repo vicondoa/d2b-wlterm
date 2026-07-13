@@ -14,6 +14,8 @@
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
       version = "0.2.0";
+      runtimeBins = pkgs: with pkgs; [ quickshell ];
+      runtimeFonts = pkgs: with pkgs; [ material-symbols ];
     in
     {
       packages = forAllSystems (system:
@@ -26,12 +28,18 @@
             pname = "d2b-wlterm";
             inherit version;
             src = pkgs.lib.cleanSource ./.;
+            nativeBuildInputs = with pkgs; [ makeWrapper ];
             postPatch = ''
               substituteInPlace Cargo.toml \
                 --replace-fail "../d2b-toolkit/crates/d2b-toolkit-core" \
                   "${toolkitSource}/share/d2b-toolkit/crates/d2b-toolkit-core" \
                 --replace-fail "../d2b-toolkit/crates/d2b-client" \
                   "${toolkitSource}/share/d2b-toolkit/crates/d2b-client"
+            '';
+            postInstall = ''
+              wrapProgram "$out/bin/d2b-wlterm" \
+                --prefix PATH : ${pkgs.lib.makeBinPath (runtimeBins pkgs)} \
+                --prefix XDG_DATA_DIRS : ${pkgs.lib.makeSearchPath "share" (runtimeFonts pkgs)}
             '';
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [ "-p" "wlterm-cli" ];
@@ -135,7 +143,15 @@
         let pkgs = import nixpkgs { inherit system; };
         in {
           default = pkgs.mkShell {
-            packages = with pkgs; [ cargo clippy rustc rustfmt nixpkgs-fmt ];
+            packages = with pkgs; [
+              cargo
+              clippy
+              rustc
+              rustfmt
+              nixpkgs-fmt
+              quickshell
+              material-symbols
+            ];
           };
         });
 

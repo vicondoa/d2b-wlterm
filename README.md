@@ -14,6 +14,10 @@ a Quickshell control center, and a Home Manager module.
   `builder.dev.d2b` or `tools.host.d2b`; legacy local VM names remain accepted.
 - Supports first-class local VMs without `legacyVmName`.
 - Groups workloads by realm while preserving realm accent rails.
+- Opens the control center unpinned. After it first receives focus, moving focus
+  away closes it unless the top-right pin is active for that process.
+- Lets users drag empty header chrome within the compositor-provided usable
+  output area; every new process returns to the 24 px top-right placement.
 - Shows provider kind, isolation, session persistence, availability, and typed
   remediation. `unsafe-local` is labeled **NO ISOLATION**.
 - Requires `unsafe-local-shell-v1` before exposing unsafe-local shell actions.
@@ -37,6 +41,18 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 nix flake check
 ```
+
+Inside a Niri/Wayland session, generate a deterministic review image without
+contacting d2bd or enabling actions:
+
+```bash
+cargo run -p wlterm-cli -- render-sample ./wlterm-control-center.png
+```
+
+The command uses the production Quickshell QML tree, requires `quickshell` and
+the Material Symbols font (both are in `nix develop`), and validates a
+420x720 physical-pixel, non-uniform PNG smaller than 5 MB at any output scale.
+Generated images are not tracked.
 
 ## Flake inputs
 
