@@ -2,10 +2,12 @@
 
 use std::{
     env, fs,
-    io::Write as _,
+    io::{Cursor, Read as _, Write as _},
     os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use serde::Serialize;
@@ -78,6 +80,87 @@ pub fn decide_open(
 const QML_FILE: &str = "shell.qml";
 const PID_FILE: &str = "quickshell.pid";
 const SIGTERM: i32 = 15;
+pub const INITIAL_PANEL_MARGIN: f64 = 24.0;
+pub const PANEL_EDGE_MARGIN: f64 = 4.0;
+pub const RENDER_WIDTH: u32 = 420;
+pub const RENDER_HEIGHT: u32 = 720;
+const RENDER_TIMEOUT: Duration = Duration::from_secs(8);
+const MAX_RENDER_BYTES: u64 = 5 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PanelLifecycle {
+    had_focus: bool,
+    pinned: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FocusChange {
+    KeepOpen,
+    Dismiss,
+}
+
+impl PanelLifecycle {
+    pub const fn is_pinned(self) -> bool {
+        self.pinned
+    }
+
+    pub fn set_pinned(&mut self, pinned: bool) {
+        self.pinned = pinned;
+    }
+
+    pub fn on_focus_changed(&mut self, focused: bool) -> FocusChange {
+        if focused {
+            self.had_focus = true;
+            FocusChange::KeepOpen
+        } else if self.had_focus && !self.pinned {
+            FocusChange::Dismiss
+        } else {
+            FocusChange::KeepOpen
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PanelPlacement {
+    pub top: f64,
+    pub right: f64,
+}
+
+impl Default for PanelPlacement {
+    fn default() -> Self {
+        Self {
+            top: INITIAL_PANEL_MARGIN,
+            right: INITIAL_PANEL_MARGIN,
+        }
+    }
+}
+
+impl PanelPlacement {
+    pub fn clamped(
+        self,
+        usable_width: f64,
+        usable_height: f64,
+        panel_width: f64,
+        panel_height: f64,
+    ) -> Self {
+        Self {
+            top: clamp_margin(self.top, usable_height - panel_height - PANEL_EDGE_MARGIN),
+            right: clamp_margin(self.right, usable_width - panel_width - PANEL_EDGE_MARGIN),
+        }
+    }
+}
+
+fn clamp_margin(value: f64, available: f64) -> f64 {
+    value.clamp(PANEL_EDGE_MARGIN, available.max(PANEL_EDGE_MARGIN))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderArtifact {
+    pub path: PathBuf,
+    pub width: u32,
+    pub height: u32,
+    pub bytes: u64,
+}
 
 unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
@@ -115,6 +198,9 @@ pub fn open(_config: &wlterm_core::Config) -> Result<(), String> {
         .arg("--no-duplicate")
         .env("D2B_WLTERM_BIN", backend)
         .env("D2B_WLTERM_THEME_JSON", theme_json)
+        .env_remove("D2B_WLTERM_RENDER_MODE")
+        .env_remove("D2B_WLTERM_RENDER_PATH")
+        .env_remove("D2B_WLTERM_MOCK_STATE")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -130,6 +216,400 @@ pub fn open(_config: &wlterm_core::Config) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+pub fn render_sample(output: &Path) -> Result<RenderArtifact, String> {
+    if env::var_os("WAYLAND_DISPLAY").is_none() {
+        return Err(
+            "render-sample requires an active Niri/Wayland session (WAYLAND_DISPLAY is unset)"
+                .to_string(),
+        );
+    }
+    let output = absolute_render_path(output)?;
+    if output.exists() {
+        fs::remove_file(&output)
+            .map_err(|err| format!("failed to replace {}: {err}", output.display()))?;
+    }
+
+    let dir = runtime_dir()?;
+    fs::create_dir_all(&dir).map_err(|err| format!("failed to create runtime dir: {err}"))?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+        .map_err(|err| format!("failed to secure runtime dir: {err}"))?;
+    let qml_path = dir.join(format!("render-shell-{}.qml", std::process::id()));
+    write_private_file(&qml_path, QML_SOURCE.as_bytes())?;
+
+    let result = run_render_frontend(&qml_path, &output).and_then(|()| {
+        normalize_rendered_png(&output)?;
+        validate_render_png(&output).map(|mut artifact| {
+            artifact.path = output.clone();
+            artifact
+        })
+    });
+    let _ = fs::remove_file(qml_path);
+    result
+}
+
+fn absolute_render_path(output: &Path) -> Result<PathBuf, String> {
+    let file_name = output
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "render-sample requires an explicit PNG output path".to_string())?;
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = if parent.is_absolute() {
+        parent.to_path_buf()
+    } else {
+        env::current_dir()
+            .map_err(|err| format!("failed to resolve render output directory: {err}"))?
+            .join(parent)
+    };
+    let parent = fs::canonicalize(&parent)
+        .map_err(|err| format!("render output directory is unavailable: {err}"))?;
+    if !parent.is_dir() {
+        return Err("render output parent must be a directory".to_string());
+    }
+    Ok(parent.join(file_name))
+}
+
+fn run_render_frontend(qml_path: &Path, output: &Path) -> Result<(), String> {
+    let quickshell = quickshell_program()
+        .ok_or_else(|| "failed to find quickshell frontend binary".to_string())?;
+    let backend =
+        env::current_exe().map_err(|err| format!("failed to locate d2b-wlterm backend: {err}"))?;
+    let output_text = output
+        .to_str()
+        .ok_or_else(|| "render output path must be valid UTF-8".to_string())?;
+    let mut child = Command::new(quickshell)
+        .arg("--path")
+        .arg(qml_path)
+        .env("D2B_WLTERM_BIN", backend)
+        .env("D2B_WLTERM_RENDER_MODE", "1")
+        .env("D2B_WLTERM_RENDER_PATH", output_text)
+        .env("D2B_WLTERM_MOCK_STATE", render_sample_state_json())
+        .env("D2B_WLTERM_THEME_JSON", render_sample_theme_json())
+        .env("QS_NO_RELOAD_POPUP", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to launch quickshell renderer: {err}"))?;
+    let Some(stderr) = child.stderr.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("failed to capture quickshell renderer diagnostics".to_string());
+    };
+    let diagnostics = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr.take(16 * 1024).read_to_end(&mut bytes);
+        String::from_utf8_lossy(&bytes).into_owned()
+    });
+
+    let deadline = Instant::now() + RENDER_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = diagnostics.join();
+                return Err(format!("failed to inspect quickshell renderer: {err}"));
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let detail = diagnostics.join().unwrap_or_default();
+            return Err(render_failure(
+                "quickshell render timed out after 8 seconds",
+                &detail,
+            ));
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let detail = diagnostics.join().unwrap_or_default();
+    if !status.success() {
+        return Err(render_failure("quickshell render failed", &detail));
+    }
+    Ok(())
+}
+
+fn render_failure(summary: &str, detail: &str) -> String {
+    let detail = detail.trim();
+    if detail.is_empty() {
+        summary.to_string()
+    } else {
+        let bounded: String = detail.chars().take(2000).collect();
+        format!("{summary}: {bounded}")
+    }
+}
+
+fn normalize_rendered_png(path: &Path) -> Result<(), String> {
+    let metadata = fs::metadata(path)
+        .map_err(|err| format!("render did not produce {}: {err}", path.display()))?;
+    if metadata.len() == 0 || metadata.len() >= MAX_RENDER_BYTES {
+        return Err(format!(
+            "rendered PNG must be non-empty and smaller than 5 MB (got {} bytes)",
+            metadata.len()
+        ));
+    }
+    let bytes = fs::read(path)
+        .map_err(|err| format!("failed to inspect rendered PNG {}: {err}", path.display()))?;
+    if let Some(normalized) = normalize_png_bytes(&bytes, RENDER_WIDTH, RENDER_HEIGHT)? {
+        if normalized.len() as u64 >= MAX_RENDER_BYTES {
+            return Err(format!(
+                "normalized PNG must be smaller than 5 MB (got {} bytes)",
+                normalized.len()
+            ));
+        }
+        fs::write(path, normalized)
+            .map_err(|err| format!("failed to normalize rendered PNG: {err}"))?;
+    }
+    Ok(())
+}
+
+fn normalize_png_bytes(bytes: &[u8], width: u32, height: u32) -> Result<Option<Vec<u8>>, String> {
+    let decoder = png::Decoder::new(Cursor::new(bytes));
+    let mut reader = decoder
+        .read_info()
+        .map_err(|err| format!("failed to decode rendered PNG: {err}"))?;
+    let source_width = reader.info().width;
+    let source_height = reader.info().height;
+    if source_width == 0
+        || source_height == 0
+        || source_width > width.saturating_mul(4)
+        || source_height > height.saturating_mul(4)
+    {
+        return Err(format!(
+            "rendered PNG dimensions {source_width}x{source_height} are outside the supported normalization range"
+        ));
+    }
+    if (source_width, source_height) == (width, height) {
+        return Ok(None);
+    }
+
+    let mut buffer = vec![0; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buffer)
+        .map_err(|err| format!("failed to decode rendered pixels: {err}"))?;
+    let source = png_frame_to_rgba(&buffer[..info.buffer_size()], &info)?;
+    let resized = resize_rgba_nearest(&source, info.width, info.height, width, height);
+    encode_rgba_png(&resized, width, height).map(Some)
+}
+
+fn png_frame_to_rgba(bytes: &[u8], info: &png::OutputInfo) -> Result<Vec<u8>, String> {
+    if info.bit_depth != png::BitDepth::Eight {
+        return Err(format!(
+            "rendered PNG uses unsupported {:?} channel depth",
+            info.bit_depth
+        ));
+    }
+    let pixels = u64::from(info.width)
+        .checked_mul(u64::from(info.height))
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or_else(|| "rendered PNG dimensions overflowed".to_string())?;
+    let mut rgba = Vec::with_capacity(pixels.saturating_mul(4));
+    match info.color_type {
+        png::ColorType::Rgba => rgba.extend_from_slice(bytes),
+        png::ColorType::Rgb => {
+            for pixel in bytes.chunks_exact(3) {
+                rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+            }
+        }
+        png::ColorType::Grayscale => {
+            for &value in bytes {
+                rgba.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        png::ColorType::GrayscaleAlpha => {
+            for pixel in bytes.chunks_exact(2) {
+                rgba.extend_from_slice(&[pixel[0], pixel[0], pixel[0], pixel[1]]);
+            }
+        }
+        png::ColorType::Indexed => {
+            return Err("rendered PNG uses an unsupported indexed color format".to_string());
+        }
+    }
+    if rgba.len() != pixels.saturating_mul(4) {
+        return Err("rendered PNG has an incomplete pixel buffer".to_string());
+    }
+    Ok(rgba)
+}
+
+fn resize_rgba_nearest(
+    source: &[u8],
+    source_width: u32,
+    source_height: u32,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let mut resized = vec![
+        0;
+        (width as usize)
+            .saturating_mul(height as usize)
+            .saturating_mul(4)
+    ];
+    for y in 0..height {
+        let source_y = ((u64::from(y) * u64::from(source_height)) / u64::from(height))
+            .min(u64::from(source_height.saturating_sub(1))) as usize;
+        for x in 0..width {
+            let source_x = ((u64::from(x) * u64::from(source_width)) / u64::from(width))
+                .min(u64::from(source_width.saturating_sub(1))) as usize;
+            let source_offset = (source_y * source_width as usize + source_x) * 4;
+            let target_offset = (y as usize * width as usize + x as usize) * 4;
+            resized[target_offset..target_offset + 4]
+                .copy_from_slice(&source[source_offset..source_offset + 4]);
+        }
+    }
+    resized
+}
+
+fn encode_rgba_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let mut encoded = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut encoded, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|err| format!("failed to encode normalized PNG: {err}"))?;
+        writer
+            .write_image_data(rgba)
+            .map_err(|err| format!("failed to encode normalized PNG: {err}"))?;
+    }
+    Ok(encoded)
+}
+
+fn validate_render_png(path: &Path) -> Result<RenderArtifact, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|err| format!("render did not produce {}: {err}", path.display()))?;
+    if metadata.len() == 0 || metadata.len() >= MAX_RENDER_BYTES {
+        return Err(format!(
+            "rendered PNG must be non-empty and smaller than 5 MB (got {} bytes)",
+            metadata.len()
+        ));
+    }
+    let bytes = fs::read(path)
+        .map_err(|err| format!("failed to inspect rendered PNG {}: {err}", path.display()))?;
+    let (width, height) = validate_render_png_bytes(&bytes)?;
+    Ok(RenderArtifact {
+        path: path.to_path_buf(),
+        width,
+        height,
+        bytes: metadata.len(),
+    })
+}
+
+fn validate_render_png_bytes(bytes: &[u8]) -> Result<(u32, u32), String> {
+    const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if !bytes.starts_with(PNG_SIGNATURE) {
+        return Err("render output is not a PNG".to_string());
+    }
+    let decoder = png::Decoder::new(Cursor::new(bytes));
+    let mut reader = decoder
+        .read_info()
+        .map_err(|err| format!("failed to decode rendered PNG: {err}"))?;
+    let mut pixels = vec![0; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut pixels)
+        .map_err(|err| format!("failed to decode rendered pixels: {err}"))?;
+    if (info.width, info.height) != (RENDER_WIDTH, RENDER_HEIGHT) {
+        return Err(format!(
+            "rendered PNG has {}x{} pixels; expected {}x{}",
+            info.width, info.height, RENDER_WIDTH, RENDER_HEIGHT
+        ));
+    }
+    if info.bit_depth != png::BitDepth::Eight {
+        return Err("rendered PNG must use 8-bit color".to_string());
+    }
+    let samples = match info.color_type {
+        png::ColorType::Grayscale | png::ColorType::Indexed => 1,
+        png::ColorType::GrayscaleAlpha => 2,
+        png::ColorType::Rgb => 3,
+        png::ColorType::Rgba => 4,
+    };
+    let pixels = &pixels[..info.buffer_size()];
+    let Some(first) = pixels.get(..samples) else {
+        return Err("rendered PNG has no pixels".to_string());
+    };
+    if !pixels
+        .chunks_exact(samples)
+        .skip(1)
+        .any(|pixel| pixel != first)
+    {
+        return Err("rendered PNG is visually uniform".to_string());
+    }
+    Ok((info.width, info.height))
+}
+
+pub fn render_sample_state_json() -> String {
+    let dev = serde_json::json!({
+        "target": "builder.dev.d2b",
+        "id": "builder",
+        "canonicalTarget": "builder.dev.d2b",
+        "legacyVmName": "builder",
+        "label": "Builder",
+        "providerKind": "local-vm",
+        "isolationPosture": "virtual-machine",
+        "sessionPersistence": "vm-lifetime",
+        "availability": "ready",
+        "powerState": "online",
+        "disabled": false,
+        "disabledReason": null,
+        "activeShells": 2,
+        "shells": [
+            {"name": "quiet-otter", "visualState": "attached", "isDefault": true, "attached": true, "actions": ["focus-existing", "prompt-force-open", "stop"]},
+            {"name": "brave-panda", "visualState": "detached", "isDefault": false, "attached": false, "actions": ["open", "stop"]}
+        ]
+    });
+    let host = serde_json::json!({
+        "target": "tools.host.d2b",
+        "id": "tools",
+        "canonicalTarget": "tools.host.d2b",
+        "label": "Host tools",
+        "providerKind": "unsafe-local",
+        "isolationPosture": "unsafe-local",
+        "isolationWarning": "No isolation: runs in the host user session",
+        "sessionPersistence": "user-manager-lifetime",
+        "availability": "helper-unavailable",
+        "remediation": {"kind": "restart-helper", "message": "Restart the unsafe-local helper"},
+        "powerState": "unknown",
+        "disabled": true,
+        "disabledReason": "helper-unavailable",
+        "activeShells": 1,
+        "shells": [
+            {"name": "calm-fox", "visualState": "detached", "isDefault": false, "attached": false, "actions": []}
+        ]
+    });
+    serde_json::json!({
+        "vms": [dev.clone(), host.clone()],
+        "workloads": [dev.clone(), host.clone()],
+        "realmGroups": [
+            {"realm": "dev", "workloads": [dev]},
+            {"realm": "host", "workloads": [host]}
+        ],
+        "activeShells": 3,
+        "hasError": false,
+        "errors": [],
+        "remediation": {
+            "kind": "update-d2b",
+            "message": "Sample remediation: update desktop components together"
+        }
+    })
+    .to_string()
+}
+
+fn render_sample_theme_json() -> String {
+    serde_json::json!({
+        "host": {"accent": "#f38ba8"},
+        "realms": {
+            "dev": {"accent": "#89b4fa"},
+            "host": {"accent": "#f38ba8"}
+        }
+    })
+    .to_string()
 }
 
 fn runtime_dir() -> Result<PathBuf, String> {
@@ -251,24 +731,35 @@ const QML_SOURCE: &str = r##"
     //@ pragma IconTheme Adwaita
 
     import QtQuick
+    import QtQuick.Window
     import Quickshell
     import Quickshell.Io
+    import Quickshell.Wayland
 
     ShellRoot {
       id: root
       property string backend: Quickshell.env("D2B_WLTERM_BIN") || "d2b-wlterm"
-      property var state: ({ workloads: [], vms: [], realmGroups: [], activeShells: 0, hasError: false, errors: [], remediation: null })
+      property bool renderMode: Quickshell.env("D2B_WLTERM_RENDER_MODE") === "1"
+      property string renderPath: Quickshell.env("D2B_WLTERM_RENDER_PATH") || ""
+      property var state: renderMode
+        ? parseJsonObject(Quickshell.env("D2B_WLTERM_MOCK_STATE"))
+        : ({ workloads: [], vms: [], realmGroups: [], activeShells: 0, hasError: false, errors: [], remediation: null })
       property bool busy: false
       property string message: ""
       property string hoverHint: ""
       property bool failed: false
       property string confirmKey: ""
+      property bool hadFocus: false
+      property bool pinned: false
       property real panelTopMargin: 24
       property real panelRightMargin: 24
       property var theme: parseJsonObject(Quickshell.env("D2B_WLTERM_THEME_JSON"))
 
-      function reload() { statusProc.exec([backend, "status-json"]) }
+      function reload() {
+        if (!renderMode) statusProc.exec([backend, "status-json"])
+      }
       function action(args) {
+        if (renderMode) return
         busy = true
         failed = false
         message = runningMessage(args)
@@ -337,12 +828,30 @@ const QML_SOURCE: &str = r##"
         if (name === "error") return "#f38ba8"
         return "#9399b2"
       }
+      function handlePanelFocus(focused) {
+        if (renderMode) return
+        if (focused) {
+          hadFocus = true
+        } else if (hadFocus && !pinned) {
+          Qt.quit()
+        }
+      }
       function screenWidth() { return panel.screen ? panel.screen.width : 1280 }
       function screenHeight() { return panel.screen && panel.screen.height > 0 ? panel.screen.height : 1080 }
+      function usableWidth() {
+        return panel.width > 0 ? panel.width : screenWidth()
+      }
+      function usableHeight() {
+        return panel.height > 0 ? panel.height : screenHeight()
+      }
       function clamp(value, min, max) { return Math.max(min, Math.min(max, value)) }
+      function reclampPanel() {
+        panelRightMargin = clamp(panelRightMargin, 4, Math.max(4, usableWidth() - panelCard.width - 4))
+        panelTopMargin = clamp(panelTopMargin, 4, Math.max(4, usableHeight() - panelCard.height - 4))
+      }
       function movePanel(dx, dy) {
-        panelRightMargin = clamp(panelRightMargin - dx, 4, Math.max(4, screenWidth() - panel.width - 4))
-        panelTopMargin = clamp(panelTopMargin + dy, 4, Math.max(4, screenHeight() - panel.height - 4))
+        panelRightMargin = clamp(panelRightMargin - dx, 4, Math.max(4, usableWidth() - panelCard.width - 4))
+        panelTopMargin = clamp(panelTopMargin + dy, 4, Math.max(4, usableHeight() - panelCard.height - 4))
       }
       function confirmStop(vm, shell) {
         const key = "stop:" + vm + ":" + shell
@@ -355,8 +864,12 @@ const QML_SOURCE: &str = r##"
           confirmTimer.restart()
         }
       }
-      function maxPanelHeight() { return Math.max(720, Math.floor(root.screenHeight() * 0.92)) }
+      function maxPanelHeight() { return Math.max(1, Math.floor(root.usableHeight()) - 8) }
       function panelContentHeight() { return 360 + list.implicitHeight + (message.length > 0 ? 36 : 0) }
+
+      Component.onCompleted: {
+        if (renderMode) pinned = true
+      }
 
       Process {
         id: statusProc
@@ -393,28 +906,59 @@ const QML_SOURCE: &str = r##"
 
       Timer { id: clearMessage; interval: 2600; repeat: false; onTriggered: if (!root.busy) root.message = "" }
       Timer { id: confirmTimer; interval: 2400; repeat: false; onTriggered: { root.confirmKey = ""; if (!root.busy) root.message = "" } }
-      Timer { interval: 2500; running: true; repeat: true; triggeredOnStart: true; onTriggered: if (!statusProc.running && !actionProc.running) root.reload() }
+      Timer { interval: 2500; running: !root.renderMode; repeat: true; triggeredOnStart: true; onTriggered: if (!statusProc.running && !actionProc.running) root.reload() }
 
+      Timer {
+        interval: 750
+        running: root.renderMode
+        repeat: false
+        onTriggered: {
+          if (root.renderPath.length === 0) {
+            console.error("render output path is empty")
+            Qt.quit()
+            return
+          }
+          panelCard.grabToImage(function(result) {
+            if (!result || !result.saveToFile(root.renderPath)) {
+              console.error("failed to save rendered control center")
+            }
+            Qt.quit()
+          }, Qt.size(420, 720))
+        }
+      }
+
+      // Opposing anchors expose the compositor's post-exclusive-zone work area.
       PanelWindow {
         id: panel
         visible: true
-        focusable: true
         aboveWindows: true
         exclusiveZone: 0
-        implicitWidth: 420
-        implicitHeight: Math.min(Math.max(620, root.panelContentHeight()), root.maxPanelHeight())
         color: "transparent"
         surfaceFormat { opaque: false }
-        anchors { top: true; right: true }
-        margins { top: root.panelTopMargin; right: root.panelRightMargin }
+        anchors { top: true; right: true; bottom: true; left: true }
+        mask: Region { item: panelCard; radius: 18 }
+        WlrLayershell.namespace: "d2b-wlterm-control-center"
+        WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
+        onWidthChanged: root.reclampPanel()
+        onHeightChanged: root.reclampPanel()
+        onScreenChanged: Qt.callLater(root.reclampPanel)
+        onDevicePixelRatioChanged: Qt.callLater(root.reclampPanel)
 
         Rectangle {
-          anchors.fill: parent
+          id: panelCard
+          x: panel.width - width - root.panelRightMargin
+          y: root.panelTopMargin
+          width: 420
+          height: root.renderMode
+            ? 720
+            : Math.min(Math.max(620, root.panelContentHeight()), root.maxPanelHeight())
           radius: 18
           color: "#0f1117"
           border.color: "#2a2d35"
           border.width: 1
           clip: true
+          onHeightChanged: root.reclampPanel()
+          Window.onActiveChanged: root.handlePanelFocus(Window.active)
 
           Column {
             x: 16
@@ -422,6 +966,7 @@ const QML_SOURCE: &str = r##"
             width: parent.width - 32
             height: parent.height - 32
             spacing: 12
+            onImplicitHeightChanged: root.reclampPanel()
 
             Item {
               width: parent.width
@@ -429,6 +974,7 @@ const QML_SOURCE: &str = r##"
               MouseArea {
                 anchors.fill: parent
                 acceptedButtons: Qt.LeftButton
+                cursorShape: Qt.SizeAllCursor
                 property real lastX: 0
                 property real lastY: 0
                 onPressed: (mouse) => { lastX = mouse.x; lastY = mouse.y }
@@ -445,7 +991,17 @@ const QML_SOURCE: &str = r##"
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: 8
-                IconButton { text: "refresh"; tooltip: "Refresh terminals"; enabled: !root.busy; onClicked: root.reload() }
+                IconButton { text: "refresh"; tooltip: "Refresh terminals"; enabled: !root.busy && !root.renderMode; onClicked: root.reload() }
+                IconButton {
+                  text: root.pinned ? "keep" : "keep_off"
+                  tooltip: root.pinned ? "Pinned · keep open when focus moves away" : "Unpinned · close after focus moves away"
+                  accessibleName: root.pinned ? "Unpin terminal control center" : "Pin terminal control center"
+                  accent: root.pinned ? "#89b4fa" : "#9399b2"
+                  checkable: true
+                  checked: root.pinned
+                  prominent: root.pinned
+                  onClicked: root.pinned = !root.pinned
+                }
               }
             }
 
@@ -506,24 +1062,16 @@ const QML_SOURCE: &str = r##"
                     width: list.width
                     height: realmGroupContent.implicitHeight + 18
                     radius: 13
-                    color: "transparent"
+                    color: root.realmAccent(realmGroup.realm, (realmGroup.workloads || [])[0])
                     clip: true
                     property var realmGroup: modelData
 
                     Rectangle {
-                      x: 0
-                      y: 0
-                      width: 5
-                      height: parent.height
-                      radius: 0
-                      color: root.realmAccent(realmGroup.realm, (realmGroup.workloads || [])[0])
-                    }
-                    Rectangle {
                       x: 5
-                      y: 0
-                      width: parent.width - 5
-                      height: parent.height
-                      radius: 10
+                      y: 1
+                      width: parent.width - 6
+                      height: parent.height - 2
+                      radius: 12
                       color: "#10131a"
                       border.color: "#2a2d35"
                       border.width: 1
@@ -581,7 +1129,7 @@ const QML_SOURCE: &str = r##"
                                   elide: Text.ElideRight
                                   wrapMode: Text.NoWrap
                                 }
-                                IconButton { text: "add"; tooltip: vm.disabled ? (vm.disabledReason || "unavailable") : "Create a named shell and open it"; enabled: !root.busy && !vm.disabled; onClicked: root.action(["create", vm.target]) }
+                                IconButton { text: "add"; tooltip: vm.disabled ? (vm.disabledReason || "unavailable") : "Create a named shell and open it"; enabled: !root.renderMode && !root.busy && !vm.disabled; onClicked: root.action(["create", vm.target]) }
                               }
 
                               Text {
@@ -626,8 +1174,8 @@ const QML_SOURCE: &str = r##"
                                     spacing: 6
                                     StatusIcon { icon: modelData.attached ? "link" : "link_off"; accent: modelData.attached ? "#ffffff" : "#9399b2"; tooltip: modelData.attached ? "attached" : "detached"; }
                                     Text { text: modelData.name; color: "#ffffff"; font.pixelSize: 12; elide: Text.ElideRight; width: parent.width - 126; anchors.verticalCenter: parent.verticalCenter }
-                                    IconButton { text: modelData.attached ? "link_off" : "terminal"; tooltip: modelData.attached ? ("Detach " + modelData.name) : ("Attach to " + modelData.name); enabled: !root.busy && !vm.disabled; onClicked: modelData.attached ? root.action(["detach", vm.target, modelData.name]) : root.action(["open", vm.target, modelData.name]) }
-                                    IconButton { text: root.confirmKey === ("stop:" + vm.target + ":" + modelData.name) ? "priority_high" : "stop"; tooltip: "Stop " + modelData.name; accent: "#9399b2"; enabled: !root.busy && !vm.disabled; onClicked: root.confirmStop(vm.target, modelData.name) }
+                                    IconButton { text: modelData.attached ? "link_off" : "terminal"; tooltip: modelData.attached ? ("Detach " + modelData.name) : ("Attach to " + modelData.name); enabled: !root.renderMode && !root.busy && !vm.disabled; onClicked: modelData.attached ? root.action(["detach", vm.target, modelData.name]) : root.action(["open", vm.target, modelData.name]) }
+                                    IconButton { text: root.confirmKey === ("stop:" + vm.target + ":" + modelData.name) ? "priority_high" : "stop"; tooltip: "Stop " + modelData.name; accent: "#9399b2"; enabled: !root.renderMode && !root.busy && !vm.disabled; onClicked: root.confirmStop(vm.target, modelData.name) }
                                   }
                                 }
                               }
@@ -670,18 +1218,29 @@ const QML_SOURCE: &str = r##"
       component IconButton: Rectangle {
         property alias text: label.text
         property string tooltip: ""
+        property string accessibleName: tooltip.length > 0 ? tooltip : text
         property color accent: "#9399b2"
+        property bool checkable: false
+        property bool checked: false
         property bool prominent: false
         signal clicked()
         width: prominent ? 30 : 26
         height: prominent ? 30 : 26
         radius: width / 2
         opacity: enabled ? 1.0 : 0.45
-        border.width: prominent ? 1 : 0
-        border.color: prominent ? accent : "transparent"
+        activeFocusOnTab: enabled
+        Accessible.role: Accessible.Button
+        Accessible.name: accessibleName
+        Accessible.description: tooltip
+        Accessible.checkable: checkable
+        Accessible.checked: checked
+        border.width: prominent || activeFocus ? 1 : 0
+        border.color: prominent || activeFocus ? accent : "transparent"
         color: prominent
           ? Qt.rgba(accent.r, accent.g, accent.b, mouse.containsMouse ? 0.34 : 0.24)
           : (mouse.containsMouse ? Qt.rgba(accent.r, accent.g, accent.b, 0.12) : "transparent")
+        Keys.onSpacePressed: if (enabled) clicked()
+        Keys.onReturnPressed: if (enabled) clicked()
 
         Text {
           id: label
@@ -698,6 +1257,7 @@ const QML_SOURCE: &str = r##"
           anchors.fill: parent
           hoverEnabled: true
           enabled: parent.enabled
+          cursorShape: Qt.PointingHandCursor
           onContainsMouseChanged: root.hoverHint = containsMouse ? (parent.tooltip.length > 0 ? parent.tooltip : parent.text) : ""
           onClicked: parent.clicked()
           onEntered: parent.scale = 1.05
@@ -1242,12 +1802,15 @@ mod tests {
             .expect("realm group block exists");
         let rail_color = QML_SOURCE[realm_block..]
             .find("color: root.realmAccent(realmGroup.realm, (realmGroup.workloads || [])[0])")
-            .expect("realm group left rail uses realm accent");
+            .expect("rounded realm frame uses realm accent");
         let inset = QML_SOURCE[realm_block..]
-            .find("x: 0")
-            .expect("realm group includes a clean left rail inset");
-        assert!(inset < 300);
-        assert!(rail_color < 800);
+            .find("x: 5")
+            .expect("realm group includes a neutral inset");
+        assert!(inset < 800);
+        assert!(rail_color < inset);
+        assert!(QML_SOURCE[realm_block..realm_block + inset].contains("radius: 13"));
+        assert!(QML_SOURCE[realm_block + inset..].starts_with("x: 5"));
+        assert!(QML_SOURCE[realm_block + inset..realm_block + inset + 180].contains("radius: 12"));
         let neutral_shell = QML_SOURCE[realm_block..]
             .find("border.color: \"#2a2d35\"")
             .expect("realm group frame uses neutral border");
@@ -1261,6 +1824,189 @@ mod tests {
             .find("border.color: \"#313645\"")
             .expect("workload card keeps neutral border");
         assert!(workload_card < 3500);
+    }
+
+    #[test]
+    fn focus_lifecycle_ignores_startup_then_dismisses_after_real_focus() {
+        let mut lifecycle = PanelLifecycle::default();
+        assert_eq!(lifecycle.on_focus_changed(false), FocusChange::KeepOpen);
+        assert_eq!(lifecycle.on_focus_changed(true), FocusChange::KeepOpen);
+        assert_eq!(lifecycle.on_focus_changed(false), FocusChange::Dismiss);
+    }
+
+    #[test]
+    fn pin_is_process_local_and_keeps_terminal_focus_changes_open() {
+        let mut lifecycle = PanelLifecycle::default();
+        assert!(!lifecycle.is_pinned());
+        lifecycle.on_focus_changed(true);
+        lifecycle.set_pinned(true);
+        assert_eq!(
+            lifecycle.on_focus_changed(false),
+            FocusChange::KeepOpen,
+            "a terminal taking focus must leave a pinned panel open"
+        );
+        lifecycle.on_focus_changed(true);
+        lifecycle.set_pinned(false);
+        assert_eq!(lifecycle.on_focus_changed(false), FocusChange::Dismiss);
+        assert!(!PanelLifecycle::default().is_pinned());
+    }
+
+    #[test]
+    fn placement_clamps_to_usable_area_and_reopens_at_24_pixels() {
+        assert_eq!(
+            PanelPlacement::default(),
+            PanelPlacement {
+                top: 24.0,
+                right: 24.0
+            }
+        );
+        assert_eq!(
+            PanelPlacement {
+                top: 900.0,
+                right: -50.0
+            }
+            .clamped(1000.0, 700.0, 420.0, 620.0),
+            PanelPlacement {
+                top: 76.0,
+                right: 4.0
+            }
+        );
+        assert_eq!(
+            PanelPlacement {
+                top: 80.0,
+                right: 580.0
+            }
+            .clamped(800.0, 500.0, 420.0, 620.0),
+            PanelPlacement {
+                top: 4.0,
+                right: 376.0
+            },
+            "output and content size changes must reclamp"
+        );
+    }
+
+    #[test]
+    fn qml_uses_guarded_focus_on_demand_and_compositor_work_area() {
+        assert!(QML_SOURCE.contains("WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand"));
+        assert!(QML_SOURCE.contains("Window.onActiveChanged: root.handlePanelFocus(Window.active)"));
+        assert!(QML_SOURCE.contains("else if (hadFocus && !pinned)"));
+        assert!(QML_SOURCE.contains("id: panel"));
+        assert!(QML_SOURCE.contains("anchors { top: true; right: true; bottom: true; left: true }"));
+        assert!(QML_SOURCE.contains("mask: Region { item: panelCard; radius: 18 }"));
+        assert!(QML_SOURCE.contains("onDevicePixelRatioChanged: Qt.callLater(root.reclampPanel)"));
+        assert!(!QML_SOURCE.contains("NIRI_SOCKET"));
+        assert!(!QML_SOURCE.contains("onClicked: Qt.quit()"));
+    }
+
+    #[test]
+    fn qml_pin_is_stateful_accessible_and_drag_handle_stays_in_chrome() {
+        assert!(QML_SOURCE.contains("property bool pinned: false"));
+        assert!(QML_SOURCE.contains("text: root.pinned ? \"keep\" : \"keep_off\""));
+        assert!(QML_SOURCE.contains("accessibleName: root.pinned ?"));
+        assert!(QML_SOURCE.contains("Accessible.role: Accessible.Button"));
+        assert!(QML_SOURCE.contains("Accessible.checked: checked"));
+        assert!(QML_SOURCE.contains("activeFocusOnTab: enabled"));
+        let header = QML_SOURCE.find("property real lastX: 0").unwrap();
+        let buttons = QML_SOURCE[header..]
+            .find("anchors.right: parent.right")
+            .unwrap();
+        assert!(buttons > 0, "header controls remain above the drag area");
+    }
+
+    #[test]
+    fn mocked_render_state_is_deterministic_and_covers_review_cases() {
+        let state: serde_json::Value = serde_json::from_str(&render_sample_state_json()).unwrap();
+        assert_eq!(state["realmGroups"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            state["realmGroups"][0]["workloads"][0]["shells"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            state["realmGroups"][0]["workloads"][0]["shells"][0]["attached"]
+                .as_bool()
+                .unwrap()
+        );
+        assert!(state["realmGroups"][1]["workloads"][0]["disabled"]
+            .as_bool()
+            .unwrap());
+        assert!(state["remediation"]["message"].is_string());
+        assert!(QML_SOURCE.contains("panelCard.grabToImage"));
+        assert!(QML_SOURCE.contains("if (renderMode) pinned = true"));
+        assert!(QML_SOURCE.contains("running: !root.renderMode"));
+        assert!(QML_SOURCE.contains("if (renderMode) return"));
+    }
+
+    fn encoded_render_png(uniform: bool) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, RENDER_WIDTH, RENDER_HEIGHT);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            let mut pixels = vec![31; RENDER_WIDTH as usize * RENDER_HEIGHT as usize * 4];
+            if !uniform {
+                let last = pixels.len() - 4;
+                pixels[last..].copy_from_slice(&[137, 180, 250, 255]);
+            }
+            writer.write_image_data(&pixels).unwrap();
+        }
+        bytes
+    }
+
+    fn encoded_scaled_render_png(width: u32, height: u32) -> Vec<u8> {
+        let mut pixels = vec![0; width as usize * height as usize * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let offset = (y as usize * width as usize + x as usize) * 4;
+                pixels[offset..offset + 4].copy_from_slice(&[
+                    (x % 251) as u8,
+                    (y % 251) as u8,
+                    ((x + y) % 251) as u8,
+                    255,
+                ]);
+            }
+        }
+        encode_rgba_png(&pixels, width, height).unwrap()
+    }
+
+    #[test]
+    fn rendered_png_validation_checks_dimensions_and_non_uniform_pixels() {
+        assert_eq!(
+            validate_render_png_bytes(&encoded_render_png(false)).unwrap(),
+            (RENDER_WIDTH, RENDER_HEIGHT)
+        );
+        assert!(validate_render_png_bytes(&encoded_render_png(true))
+            .unwrap_err()
+            .contains("visually uniform"));
+    }
+
+    #[test]
+    fn png_normalization_handles_niri_scale_1_6() {
+        let source = encoded_scaled_render_png(672, 1152);
+        let normalized = normalize_png_bytes(&source, RENDER_WIDTH, RENDER_HEIGHT)
+            .unwrap()
+            .expect("1.6x capture requires normalization");
+        assert_eq!(
+            validate_render_png_bytes(&normalized).unwrap(),
+            (RENDER_WIDTH, RENDER_HEIGHT)
+        );
+    }
+
+    #[test]
+    fn png_normalization_handles_niri_scale_1_75() {
+        let source = encoded_scaled_render_png(735, 1260);
+        let normalized = normalize_png_bytes(&source, RENDER_WIDTH, RENDER_HEIGHT)
+            .unwrap()
+            .expect("1.75x capture requires normalization");
+        assert_eq!(
+            validate_render_png_bytes(&normalized).unwrap(),
+            (RENDER_WIDTH, RENDER_HEIGHT)
+        );
+        assert!(QML_SOURCE.contains("}, Qt.size(420, 720))"));
+        assert!(!QML_SOURCE.contains("/ ratio"));
     }
 
     #[test]

@@ -76,6 +76,22 @@ fn run(args: Vec<String>) -> Result<String, String> {
             wlterm_ui::open(&cfg).map_err(|err| err.to_string())?;
             Ok(String::new())
         }
+        Some("render-sample") => {
+            let output = args
+                .get(1)
+                .ok_or_else(|| "render-sample requires an explicit PNG output path".to_string())?;
+            if args.len() != 2 {
+                return Err("render-sample accepts exactly one PNG output path".to_string());
+            }
+            let artifact = wlterm_ui::render_sample(Path::new(output))?;
+            Ok(format!(
+                "rendered={} dimensions={}x{} bytes={}",
+                artifact.path.display(),
+                artifact.width,
+                artifact.height,
+                artifact.bytes
+            ))
+        }
         Some("prompt-name") => {
             Ok(ShellNamePrompt::new(args.get(1).map_or("", String::as_str)).to_json())
         }
@@ -112,7 +128,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
 }
 
 fn help() -> String {
-    "d2b-wlterm\n\nCommands:\n  name [seed]\n  waybar\n  state|status-json\n  control-center|quickshell\n  prompt-name [shell]\n  already-attached [focus-existing|prompt|force-open]\n  list <target>\n  create <target> [shell]\n  open <target> <shell> [--force]\n  detach <target> <shell>\n  stop <target> <shell> --confirm\n  config\n  async-error".to_string()
+    "d2b-wlterm\n\nCommands:\n  name [seed]\n  waybar\n  state|status-json\n  control-center|quickshell\n  render-sample <output.png>\n  prompt-name [shell]\n  already-attached [focus-existing|prompt|force-open]\n  list <target>\n  create <target> [shell]\n  open <target> <shell> [--force]\n  detach <target> <shell>\n  stop <target> <shell> --confirm\n  config\n  async-error".to_string()
 }
 
 fn load_config() -> Config {
@@ -900,6 +916,24 @@ mod tests {
             WaybarStatus::idle().to_json()
         );
         env::remove_var("D2B_WLTERM_TEST_IDLE");
+    }
+
+    #[test]
+    fn render_sample_requires_one_explicit_output_path() {
+        assert_eq!(
+            run(vec!["render-sample".into()]).unwrap_err(),
+            "render-sample requires an explicit PNG output path"
+        );
+        assert_eq!(
+            run(vec![
+                "render-sample".into(),
+                "sample.png".into(),
+                "extra.png".into()
+            ])
+            .unwrap_err(),
+            "render-sample accepts exactly one PNG output path"
+        );
+        assert!(help().contains("render-sample <output.png>"));
     }
 
     #[test]

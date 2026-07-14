@@ -14,6 +14,9 @@ resolved through public workload inventory for compatibility.
 - `d2b-wlterm waybar` emits Waybar JSON.
 - `d2b-wlterm state` or `status-json` emits control-center JSON.
 - `d2b-wlterm control-center` or `quickshell` toggles the Quickshell panel.
+- `d2b-wlterm render-sample <output.png>` renders deterministic mocked control
+  center data through the production QML tree. It performs no daemon requests
+  or actions, validates the PNG, and requires a Niri/Wayland session.
 - `d2b-wlterm prompt-name [shell]`, `already-attached`, `config`, and
   `async-error` expose frontend support state.
 
@@ -25,3 +28,10 @@ fall back to SSH or a host shell. Unsafe-local actions are disabled when
 Errors contain bounded kind and correlation values. Opaque handles, terminal
 bytes, shell output, argv, environment, cwd, and private paths are never
 rendered.
+
+The control center starts unpinned. It ignores inactive startup transitions,
+then exits on focus loss after first focus unless its accessible top-right pin
+is active. Pin and dragged placement are process-local; reopening restores the
+24 px top-right position. Dragging empty header chrome is clamped by Layer
+Shell's compositor-provided usable output area, including reserved Waybar
+space.

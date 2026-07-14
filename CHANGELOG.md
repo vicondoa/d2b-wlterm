@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Transient Quickshell control-center focus lifecycle with a per-process pin,
+  keyboard-accessible pin control, and chrome dragging within the compositor's
+  usable output area.
+- Deterministic `render-sample <output.png>` review capture using mocked
+  workloads and the production QML tree.
+
+### Changed
+
+- Realm accents now use rounded outer frames with neutral inset surfaces.
+
 ## [0.2.0] - 2026-07-11
 
 ### Added

@@ -17,6 +17,23 @@ Realm grouping is presentation metadata derived from the canonical target.
 Cards expose provider kind, typed isolation posture, session persistence,
 availability, and remediation.
 
+Realm surfaces use one rounded accent frame with a neutral inset, keeping both
+ends of the accent rail on the same contour.
+
+## Control-center lifecycle
+
+The Quickshell surface requests on-demand keyboard focus. Startup inactive
+events are ignored until genuine first focus; later focus loss exits an
+unpinned process. Pinning suppresses only that dismissal, so create/open
+actions can naturally move focus to a terminal while a pinned panel remains
+open. No action closes the panel unconditionally.
+
+Layer Shell supplies the usable output bounds after exclusive zones such as
+Waybar. Header dragging changes only in-process margins inside those bounds;
+it uses no compositor IPC or hard-coded bar geometry. Output, scale, and
+content-size changes reclamp the card, and a new process starts at the original
+24 px top-right margins.
+
 `unsafe-local` means no isolation boundary. Its shells run in the authenticated
 host user's session and may access that user's files, network, agents, D-Bus,
 and other ambient resources. The UI therefore displays an explicit
