@@ -17,7 +17,31 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Prepared the 2.0 client cutover by pinning the canonical
+  `d2b-client-toolkit` distribution and its exact d2b source revision and
+  fingerprint.
+- Audited wlterm's reducer, UI, and Waybar state as repository-local,
+  output-only presentation models; configuration remains the only
+  deserializable local format.
+- Home Manager remains the owner of the user package and presentation
+  configuration, while live session and Wayland actions are withheld until
+  their canonical services are available.
 - Realm accents now use rounded outer frames with neutral inset surfaces.
+
+### Removed
+
+- Removed the copied toolkit 0.2 workload fixtures, their protocol-conformance
+  tests, the native public-JSON integration test, and the legacy public-socket
+  adapter.
+- Removed legacy Wayland proxy readiness and terminal-stream setup. Target
+  discovery, persistent-shell operations, streams, and Wayland control now
+  fail closed instead of guessing pending APIs.
+
+### Security
+
+- Canonical target, session, service, stream, and transport contracts remain
+  owned by d2b; wlterm no longer deserializes presentation state as an
+  alternate wire format.
 
 ## [0.2.0] - 2026-07-11
 

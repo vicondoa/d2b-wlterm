@@ -3,17 +3,17 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    d2b-toolkit = {
-      url = "github:vicondoa/d2b-toolkit/v0.2.0";
+    d2b-client-toolkit = {
+      url = "github:vicondoa/d2b-toolkit/800c2878533f600d8f085b3d2aafcddb970232b2";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, d2b-toolkit }:
+  outputs = { self, nixpkgs, d2b-client-toolkit }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
-      version = "0.2.0";
+      version = "2.0.0";
       runtimeBins = pkgs: with pkgs; [ quickshell ];
       runtimeFonts = pkgs: with pkgs; [ material-symbols ];
     in
@@ -21,7 +21,7 @@
       packages = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
-          toolkitSource = d2b-toolkit.packages.${system}.default;
+          toolkitSource = d2b-client-toolkit.packages.${system}.default;
         in
         {
           default = pkgs.rustPlatform.buildRustPackage {
@@ -31,17 +31,22 @@
             nativeBuildInputs = with pkgs; [ makeWrapper ];
             postPatch = ''
               substituteInPlace Cargo.toml \
-                --replace-fail "../d2b-toolkit/crates/d2b-toolkit-core" \
-                  "${toolkitSource}/share/d2b-toolkit/crates/d2b-toolkit-core" \
-                --replace-fail "../d2b-toolkit/crates/d2b-client" \
-                  "${toolkitSource}/share/d2b-toolkit/crates/d2b-client"
+                --replace-fail "../d2b-client-toolkit/crates/d2b-client-toolkit" \
+                  "${toolkitSource}/share/d2b-client-toolkit/distribution/crates/d2b-client-toolkit"
             '';
             postInstall = ''
               wrapProgram "$out/bin/d2b-wlterm" \
                 --prefix PATH : ${pkgs.lib.makeBinPath (runtimeBins pkgs)} \
                 --prefix XDG_DATA_DIRS : ${pkgs.lib.makeSearchPath "share" (runtimeFonts pkgs)}
             '';
-            cargoLock.lockFile = ./Cargo.lock;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              outputHashes = {
+                "d2b-client-2.0.0" = "sha256-H0IEHleS2dLCBxnosGF8ztkA/qTnsmyG6Y1QQIhZ4lU=";
+                "d2b-contracts-2.0.0" = "sha256-H0IEHleS2dLCBxnosGF8ztkA/qTnsmyG6Y1QQIhZ4lU=";
+                "d2b-session-2.0.0" = "sha256-H0IEHleS2dLCBxnosGF8ztkA/qTnsmyG6Y1QQIhZ4lU=";
+              };
+            };
             cargoBuildFlags = [ "-p" "wlterm-cli" ];
             cargoTestFlags = [ "--workspace" ];
             meta = {
@@ -102,10 +107,10 @@
         in {
           package = self.packages.${system}.default;
           release-metadata = pkgs.runCommand "d2b-wlterm-release-metadata-${version}" { } ''
-            grep -Fq 'version = "0.2.0"' ${./Cargo.toml}
-            grep -Fq '## [0.2.0] - 2026-07-11' ${./CHANGELOG.md}
-            grep -Fq 'tag = "v0.2.0"' ${./Cargo.toml}
-            grep -Fq 'fde6af8b842718e7150f5056d4eba73093d4ad77' ${./flake.lock}
+            grep -Fq 'version = "2.0.0"' ${./Cargo.toml}
+            grep -Fq 'revision = "800c2878533f600d8f085b3d2aafcddb970232b2"' ${./Cargo.toml}
+            grep -Fq 'd2b-source-revision = "4018d9c9652bd826c2e6a9abccdcdcafb832d944"' ${./Cargo.toml}
+            grep -Fq '800c2878533f600d8f085b3d2aafcddb970232b2' ${./flake.lock}
             touch $out
           '';
           home-manager-module = pkgs.runCommand "d2b-wlterm-home-manager-module-${version}" { } ''
@@ -113,8 +118,6 @@
             grep -q 'public_socket_path = "/run/d2b/public.sock"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q 'wezterm_command = \[' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q '"weezterm"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
-            grep -q 'wayland_proxy_command = \[' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
-            grep -q '"d2b-wayland-proxy"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q 'default_open_behavior = "force-open"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q 'module_name = "custom/d2b-wlterm"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
             grep -q 'control_center_state_path = "$XDG_RUNTIME_DIR/d2b-wlterm/control-center.json"' "${hmEval.config.xdg.configFile."d2b-wlterm/config.toml".source}"
@@ -127,7 +130,7 @@
             printf '%s' '${hmEval.config.xdg.configFile."d2b-wlterm/quickshell-control-center.json".text}' \
               | grep -q '"statePath"'
             printf '%s' '${hmEval.config.xdg.configFile."d2b-wlterm/quickshell-control-center.json".text}' \
-              | grep -q '"detach"'
+              | grep -qv '"actions"'
             touch $out
           '';
         });

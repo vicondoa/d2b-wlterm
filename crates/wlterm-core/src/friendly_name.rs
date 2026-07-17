@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Serialize, Serializer};
 
 pub const FRIENDLY_NAME_MAX_BYTES: usize = 64;
 pub const FRIENDLY_NAME_RETRY_LIMIT: usize = 32;
@@ -72,16 +72,6 @@ impl Serialize for FriendlyName {
         S: Serializer,
     {
         serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for FriendlyName {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::from_candidate(value).map_err(serde::de::Error::custom)
     }
 }
 
