@@ -110,6 +110,7 @@
             grep -Fq 'version = "2.0.0"' ${./Cargo.toml}
             grep -Fq 'revision = "800c2878533f600d8f085b3d2aafcddb970232b2"' ${./Cargo.toml}
             grep -Fq 'd2b-source-revision = "4018d9c9652bd826c2e6a9abccdcdcafb832d944"' ${./Cargo.toml}
+            grep -Fq 'source-inventory-sha256 = "2aaef697cc53abc8757a3593352cd5bd1d3f0d3f2031c6a2967f92afa5e74d97"' ${./Cargo.toml}
             grep -Fq '800c2878533f600d8f085b3d2aafcddb970232b2' ${./flake.lock}
             touch $out
           '';

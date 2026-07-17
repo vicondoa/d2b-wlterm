@@ -19,7 +19,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Prepared the 2.0 client cutover by pinning the canonical
   `d2b-client-toolkit` distribution and its exact d2b source revision and
-  fingerprint.
+  fingerprint, including the final source inventory digest.
 - Audited wlterm's reducer, UI, and Waybar state as repository-local,
   output-only presentation models; configuration remains the only
   deserializable local format.
