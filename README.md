@@ -1,22 +1,23 @@
 # d2b-wlterm
 
 `d2b-wlterm` is the Home Manager and presentation companion for persistent d2b
-terminal sessions. Version 2.0 prepares the client boundary for d2b's canonical
-client, contract, and session crates without copying their protocols.
+terminal sessions. Version 2.0 uses d2b's canonical authenticated client,
+contract, session, and terminal APIs without copying their protocols.
 
 The repository currently provides its presentation reducer, Waybar output,
 Quickshell control center, deterministic review renderer, CLI package, and Home
-Manager module. Live target discovery, session setup, persistent-shell streams,
-and Wayland control fail closed until their canonical services are available.
-There is no legacy public-JSON or direct-compositor fallback.
+Manager module. Authenticated discovery and shell management use the frozen
+service facade. Interactive desktop stream routing remains fail-closed until
+its W8 route is available. There is no legacy public-JSON, SSH, helper-socket,
+or direct-compositor fallback.
 
 ## Source ownership
 
 The `d2b-client-toolkit` input is pinned exactly. Its canonical d2b source is
-revision `4018d9c9652bd826c2e6a9abccdcdcafb832d944`, fingerprint
-`c2c99bdd77ba66948fce81161dcc3efde608eefefb96f28fa934c9f58d96d838`,
+revision `9dc902243cdd7aba7ef269988b96f0aae6e037da`, fingerprint
+`5a20cef3a64281df819eeb76bdfe385999755479b467b559653011582fb9c043`,
 and inventory digest
-`2aaef697cc53abc8757a3593352cd5bd1d3f0d3f2031c6a2967f92afa5e74d97`.
+`35c33c2e23e1b9f03b5abc3bbca2d3320e38c42dfc7aceb7e3476d28210cde8c`.
 `wlterm-core`, `wlterm-ui`, and `wlterm-waybar` own only repository-local
 configuration and presentation state.
 
@@ -49,7 +50,7 @@ repository:
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     d2b-client-toolkit = {
-      url = "github:vicondoa/d2b-toolkit/800c2878533f600d8f085b3d2aafcddb970232b2";
+      url = "github:vicondoa/d2b-toolkit/3d6b75d47c8df66c1722ea324d64334a127d43ec";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 

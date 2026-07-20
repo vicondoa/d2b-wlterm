@@ -14,7 +14,10 @@ wlterm-core = { path = "crates/wlterm-core" }
 wlterm-d2b = { path = "crates/wlterm-d2b" }
 wlterm-waybar = { path = "crates/wlterm-waybar" }
 wlterm-ui = { path = "crates/wlterm-ui" }
-d2b-client-toolkit = { path = "../d2b-client-toolkit/crates/d2b-client-toolkit", version = "=2.0.0" }
+d2b-client-toolkit = { path = "../d2b-client-toolkit/crates/d2b-client-toolkit", version = "=2.0.0", features = ["host-socket"] }
+nix = { version = "0.29", default-features = false, features = ["socket", "user"] }
+protobuf = "3.7"
+tokio = { version = "1", features = ["rt", "time"] }
 petname = "2.0"
 png = "0.17"
 serde = { version = "1", features = ["derive"] }
@@ -24,7 +27,7 @@ toml = "0.8"
 
 [workspace.metadata.d2b-client-toolkit]
 version = "2.0.0"
-revision = "800c2878533f600d8f085b3d2aafcddb970232b2"
-d2b-source-revision = "4018d9c9652bd826c2e6a9abccdcdcafb832d944"
-d2b-source-fingerprint = "c2c99bdd77ba66948fce81161dcc3efde608eefefb96f28fa934c9f58d96d838"
-source-inventory-sha256 = "2aaef697cc53abc8757a3593352cd5bd1d3f0d3f2031c6a2967f92afa5e74d97"
+revision = "3d6b75d47c8df66c1722ea324d64334a127d43ec"
+d2b-source-revision = "9dc902243cdd7aba7ef269988b96f0aae6e037da"
+d2b-source-fingerprint = "5a20cef3a64281df819eeb76bdfe385999755479b467b559653011582fb9c043"
+source-inventory-sha256 = "35c33c2e23e1b9f03b5abc3bbca2d3320e38c42dfc7aceb7e3476d28210cde8c"

@@ -17,6 +17,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Pinned the frozen W6 client toolkit and migrated workload discovery plus
+  persistent-shell list, detach, and kill to authenticated ComponentSession
+  clients and canonical terminal selections.
+- Kept interactive shell stream launch fail-closed pending its W8 desktop route;
+  no legacy public JSON, SSH, helper socket, or compositor fallback was added.
 - Prepared the 2.0 client cutover by pinning the canonical
   `d2b-client-toolkit` distribution and its exact d2b source revision and
   fingerprint, including the final source inventory digest.

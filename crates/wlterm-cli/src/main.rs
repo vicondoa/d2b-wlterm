@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use wlterm_core::friendly_name::FriendlyName;
 use wlterm_core::{AsyncErrorDisplay, Config, Model, ModelEvent, OpenBehavior, SessionId};
-use wlterm_d2b::{D2bActionBoundary, D2bClientConfig, D2bClientErrorKind};
+use wlterm_d2b::{D2bActionBoundary, D2bClientConfig};
 use wlterm_ui::{
     decide_open, AlreadyAttachedNotice, AsyncErrorEvent, ControlCenterState, OpenDecision,
     RenderedAsyncError, ShellNamePrompt, StopRequest,
@@ -155,14 +155,6 @@ fn live_model(config: &Config) -> Model {
     match boundary.inventory_blocking() {
         Ok(workloads) => model.apply(ModelEvent::WorkloadSnapshot { workloads }),
         Err(error) => {
-            if matches!(error.kind(), D2bClientErrorKind::FeatureUnavailable(_)) {
-                model.apply(ModelEvent::GlobalRemediation {
-                    remediation: wlterm_core::TargetRemediation {
-                        kind: wlterm_core::RemediationKind::UpdateD2b,
-                        message: "Install a release with canonical terminal services",
-                    },
-                });
-            }
             model.apply(ModelEvent::AsyncError {
                 message: error.to_string(),
             });

@@ -8,4 +8,7 @@ repository.workspace = true
 
 [dependencies]
 d2b-client-toolkit.workspace = true
+nix.workspace = true
+protobuf.workspace = true
+tokio.workspace = true
 wlterm-core.workspace = true

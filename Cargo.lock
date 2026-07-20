@@ -413,12 +413,15 @@ dependencies = [
 [[package]]
 name = "d2b-client"
 version = "2.0.0"
-source = "git+https://github.com/vicondoa/d2b?rev=4018d9c9652bd826c2e6a9abccdcdcafb832d944#4018d9c9652bd826c2e6a9abccdcdcafb832d944"
+source = "git+https://github.com/vicondoa/d2b?rev=9dc902243cdd7aba7ef269988b96f0aae6e037da#9dc902243cdd7aba7ef269988b96f0aae6e037da"
 dependencies = [
  "async-trait",
  "d2b-contracts",
  "d2b-session",
+ "d2b-session-unix",
+ "nix 0.29.0",
  "protobuf",
+ "sha2",
  "tokio",
  "ttrpc",
 ]
@@ -430,6 +433,7 @@ dependencies = [
  "d2b-client",
  "d2b-contracts",
  "d2b-session",
+ "d2b-session-unix",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -437,7 +441,7 @@ dependencies = [
 [[package]]
 name = "d2b-contracts"
 version = "2.0.0"
-source = "git+https://github.com/vicondoa/d2b?rev=4018d9c9652bd826c2e6a9abccdcdcafb832d944#4018d9c9652bd826c2e6a9abccdcdcafb832d944"
+source = "git+https://github.com/vicondoa/d2b?rev=9dc902243cdd7aba7ef269988b96f0aae6e037da#9dc902243cdd7aba7ef269988b96f0aae6e037da"
 dependencies = [
  "async-trait",
  "protobuf",
@@ -445,20 +449,35 @@ dependencies = [
  "serde",
  "sha2",
  "ttrpc",
+ "zeroize",
 ]
 
 [[package]]
 name = "d2b-session"
 version = "2.0.0"
-source = "git+https://github.com/vicondoa/d2b?rev=4018d9c9652bd826c2e6a9abccdcdcafb832d944#4018d9c9652bd826c2e6a9abccdcdcafb832d944"
+source = "git+https://github.com/vicondoa/d2b?rev=9dc902243cdd7aba7ef269988b96f0aae6e037da#9dc902243cdd7aba7ef269988b96f0aae6e037da"
 dependencies = [
  "async-trait",
  "d2b-contracts",
+ "futures-util",
  "protobuf",
  "sha2",
  "snow",
  "tokio",
  "ttrpc",
+]
+
+[[package]]
+name = "d2b-session-unix"
+version = "2.0.0"
+source = "git+https://github.com/vicondoa/d2b?rev=9dc902243cdd7aba7ef269988b96f0aae6e037da#9dc902243cdd7aba7ef269988b96f0aae6e037da"
+dependencies = [
+ "async-trait",
+ "d2b-contracts",
+ "d2b-session",
+ "libc",
+ "rustix 0.38.44",
+ "tokio",
 ]
 
 [[package]]
@@ -824,6 +843,19 @@ dependencies = [
 
 [[package]]
 name = "nix"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+ "memoffset 0.9.1",
+]
+
+[[package]]
+name = "nix"
 version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
@@ -1095,6 +1127,7 @@ checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
 dependencies = [
  "bitflags 2.13.1",
  "errno",
+ "itoa",
  "libc",
  "linux-raw-sys 0.4.15",
  "windows-sys 0.59.0",
@@ -1722,6 +1755,9 @@ name = "wlterm-d2b"
 version = "2.0.0"
 dependencies = [
  "d2b-client-toolkit",
+ "nix 0.29.0",
+ "protobuf",
+ "tokio",
  "wlterm-core",
 ]
 

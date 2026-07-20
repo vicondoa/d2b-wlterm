@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     d2b-client-toolkit = {
-      url = "github:vicondoa/d2b-toolkit/800c2878533f600d8f085b3d2aafcddb970232b2";
+      url = "github:vicondoa/d2b-toolkit/3d6b75d47c8df66c1722ea324d64334a127d43ec";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -42,9 +42,10 @@
             cargoLock = {
               lockFile = ./Cargo.lock;
               outputHashes = {
-                "d2b-client-2.0.0" = "sha256-H0IEHleS2dLCBxnosGF8ztkA/qTnsmyG6Y1QQIhZ4lU=";
-                "d2b-contracts-2.0.0" = "sha256-H0IEHleS2dLCBxnosGF8ztkA/qTnsmyG6Y1QQIhZ4lU=";
-                "d2b-session-2.0.0" = "sha256-H0IEHleS2dLCBxnosGF8ztkA/qTnsmyG6Y1QQIhZ4lU=";
+                "d2b-client-2.0.0" = "sha256-mDNv+gkV0GKOFDWJEunuR76mPIwQsSg9AJcxsI5qhMQ=";
+                "d2b-contracts-2.0.0" = "sha256-mDNv+gkV0GKOFDWJEunuR76mPIwQsSg9AJcxsI5qhMQ=";
+                "d2b-session-2.0.0" = "sha256-mDNv+gkV0GKOFDWJEunuR76mPIwQsSg9AJcxsI5qhMQ=";
+                "d2b-session-unix-2.0.0" = "sha256-mDNv+gkV0GKOFDWJEunuR76mPIwQsSg9AJcxsI5qhMQ=";
               };
             };
             cargoBuildFlags = [ "-p" "wlterm-cli" ];
@@ -108,10 +109,10 @@
           package = self.packages.${system}.default;
           release-metadata = pkgs.runCommand "d2b-wlterm-release-metadata-${version}" { } ''
             grep -Fq 'version = "2.0.0"' ${./Cargo.toml}
-            grep -Fq 'revision = "800c2878533f600d8f085b3d2aafcddb970232b2"' ${./Cargo.toml}
-            grep -Fq 'd2b-source-revision = "4018d9c9652bd826c2e6a9abccdcdcafb832d944"' ${./Cargo.toml}
-            grep -Fq 'source-inventory-sha256 = "2aaef697cc53abc8757a3593352cd5bd1d3f0d3f2031c6a2967f92afa5e74d97"' ${./Cargo.toml}
-            grep -Fq '800c2878533f600d8f085b3d2aafcddb970232b2' ${./flake.lock}
+            grep -Fq 'revision = "3d6b75d47c8df66c1722ea324d64334a127d43ec"' ${./Cargo.toml}
+            grep -Fq 'd2b-source-revision = "9dc902243cdd7aba7ef269988b96f0aae6e037da"' ${./Cargo.toml}
+            grep -Fq 'source-inventory-sha256 = "35c33c2e23e1b9f03b5abc3bbca2d3320e38c42dfc7aceb7e3476d28210cde8c"' ${./Cargo.toml}
+            grep -Fq '3d6b75d47c8df66c1722ea324d64334a127d43ec' ${./flake.lock}
             touch $out
           '';
           home-manager-module = pkgs.runCommand "d2b-wlterm-home-manager-module-${version}" { } ''
