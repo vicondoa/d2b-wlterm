@@ -17,6 +17,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Aligned CI and Home Manager guidance with the frozen W9 client toolkit
+  revision used by Cargo and the flake.
 - Pinned the frozen W6 client toolkit and migrated workload discovery plus
   persistent-shell list, detach, and kill to authenticated ComponentSession
   clients and canonical terminal selections.
