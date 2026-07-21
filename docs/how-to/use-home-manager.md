@@ -1,32 +1,21 @@
 # Use d2b-wlterm with Home Manager
 
-Add the flake input and import the module:
+Pin the canonical client distribution and import the module:
 
 ```nix
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-    d2b = {
-      url = "github:vicondoa/d2b";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
-    d2b-toolkit = {
-      url = "github:vicondoa/d2b-toolkit/v0.2.0";
+    d2b-client-toolkit = {
+      url = "github:vicondoa/d2b-toolkit/926de54e7320599c373524a10b65aaf13b6ff422";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
     d2b-wlterm = {
       url = "github:vicondoa/d2b-wlterm";
       inputs.nixpkgs.follows = "nixpkgs";
-      inputs.d2b-toolkit.follows = "d2b-toolkit";
-    };
-
-    weezterm = {
-      url = "github:vicondoa/weezterm";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.d2b-toolkit.follows = "d2b-toolkit";
+      inputs.d2b-client-toolkit.follows = "d2b-client-toolkit";
     };
 
     home-manager = {
@@ -35,44 +24,25 @@ Add the flake input and import the module:
     };
   };
 
-  outputs = { d2b-wlterm, home-manager, weezterm, ... }: {
+  outputs = { d2b-wlterm, home-manager, ... }: {
     homeConfigurations.alice = home-manager.lib.homeManagerConfiguration {
       modules = [
         d2b-wlterm.homeManagerModules.default
-        ({ pkgs, ... }: {
+        {
           programs.d2b-wlterm.enable = true;
-          programs.d2b-wlterm.weztermCommand = [
-            "${weezterm.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/weezterm"
-            "start"
-            "--"
-          ];
           programs.d2b-wlterm.defaultOpenBehavior = "focus-existing";
           programs.d2b-wlterm.waybar.enable = true;
           programs.d2b-wlterm.quickshell.enable = true;
-        })
+        }
       ];
     };
   };
 }
 ```
 
-The module installs the package, renders `d2b-wlterm/config.toml`, can render a
-Waybar module snippet at `d2b-wlterm/waybar-module.json`, and injects the custom
-Waybar module when Home Manager also manages Waybar. Enable
-`quickshell.enable` to render the control-center surface description at
-`d2b-wlterm/quickshell-control-center.json`.
+The module installs the package, renders `d2b-wlterm/config.toml`, optionally
+injects a Waybar module, and writes a Quickshell presentation descriptor. It
+owns only user configuration. The descriptor intentionally exposes no live
+shell or Wayland actions until the canonical services are available.
 
-The toolkit pin is release 0.2.0. Keep WezTerm and other desktop companions
-following the same toolkit input. Ensure `d2b-wayland-proxy` is on the
-user-session `PATH`, or set `waylandProxyCommand` to its absolute package path.
-A missing or unready proxy fails terminal open without a direct Wayland
-fallback.
-
-Use `defaultOpenBehavior = "prompt"` or `"force-open"` if focusing an existing
-attached terminal should not be the default. Use `asyncErrorDisplay = "inline"`
-when a frontend should render delayed d2b client failures inline instead of as a
-notification or Waybar state.
-
-Run `nix flake check` after changing the module wiring. The upstream flake's
-`checks.<system>.home-manager-module` check evaluates the rendered TOML config
-and Waybar module shape without starting d2b.
+Run `nix flake check` after changing the module wiring.

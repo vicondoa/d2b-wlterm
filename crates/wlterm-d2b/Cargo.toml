@@ -7,14 +7,8 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
-async-io.workspace = true
-d2b-client.workspace = true
-d2b-toolkit-core.workspace = true
-futures.workspace = true
-nix = { version = "0.29", default-features = false, features = ["poll", "socket"] }
-sha2.workspace = true
+d2b-client-toolkit.workspace = true
+nix.workspace = true
+protobuf.workspace = true
+tokio.workspace = true
 wlterm-core.workspace = true
-
-[dev-dependencies]
-serde.workspace = true
-serde_json.workspace = true

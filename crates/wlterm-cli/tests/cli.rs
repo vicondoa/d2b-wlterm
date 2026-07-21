@@ -8,7 +8,7 @@ fn binary_reports_version_with_success() {
         .expect("run d2b-wlterm");
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
-    assert_eq!(output.stdout, b"0.2.0\n");
+    assert_eq!(output.stdout, b"2.0.0\n");
 }
 
 #[test]

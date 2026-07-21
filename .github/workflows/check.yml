@@ -10,8 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout d2b-toolkit sibling
-        run: git clone --depth 1 https://github.com/vicondoa/d2b-toolkit ../d2b-toolkit
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt

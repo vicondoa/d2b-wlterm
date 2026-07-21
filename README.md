@@ -1,120 +1,81 @@
 # d2b-wlterm
 
-`d2b-wlterm` 0.2.0 is the Wayland terminal launcher companion for persistent
-d2b workload shells. It provides a Rust model/client boundary, Waybar output,
-a Quickshell control center, and a Home Manager module.
+`d2b-wlterm` is the Home Manager and presentation companion for persistent d2b
+terminal sessions. Version 2.0 uses d2b's canonical authenticated client,
+contract, session, and terminal APIs without copying their protocols.
 
-## Behavior
+The repository currently provides its presentation reducer, Waybar output,
+Quickshell control center, deterministic review renderer, CLI package, and Home
+Manager module. Authenticated discovery and shell management use the frozen
+service facade. Interactive desktop stream routing remains fail-closed until
+its canonical desktop route is available. There is no legacy public-JSON, SSH,
+helper-socket, or direct-compositor fallback.
 
-- Discovers workloads directly from the negotiated d2bd public socket through
-  d2b-toolkit 0.2.0.
-- Shows only workloads advertising both `persistent-shell` and a shell launcher
-  item.
-- Addresses shell operations by canonical target, such as
-  `builder.dev.d2b` or `tools.host.d2b`; legacy local VM names remain accepted.
-- Supports first-class local VMs without `legacyVmName`.
-- Groups workloads by realm while preserving realm accent rails.
-- Opens the control center unpinned. After it first receives focus, moving focus
-  away closes it unless the top-right pin is active for that process.
-- Lets users drag empty header chrome within the compositor-provided usable
-  output area; every new process returns to the 24 px top-right placement.
-- Shows provider kind, isolation, session persistence, availability, and typed
-  remediation. `unsafe-local` is labeled **NO ISOLATION**.
-- Requires `unsafe-local-shell-v1` before exposing unsafe-local shell actions.
-- Sends create/list/open/detach/confirmed-stop through d2b-toolkit shell
-  methods. It never discovers through the CLI or reads host-private state.
-- Opens WezTerm only through `d2b-wayland-proxy` and waits for typed
-  first-client readiness. Proxy failure has no direct-compositor fallback.
+## Source ownership
 
-Stop remains explicitly confirmed, and an attached shell keeps the existing
-focus/prompt/force-open behavior. Closing a terminal attachment detaches it; it
-does not kill the persistent session.
+The `d2b-client-toolkit` input is pinned exactly. Its canonical d2b source is
+revision `9dc902243cdd7aba7ef269988b96f0aae6e037da`, fingerprint
+`5a20cef3a64281df819eeb76bdfe385999755479b467b559653011582fb9c043`,
+and inventory digest
+`35c33c2e23e1b9f03b5abc3bbca2d3320e38c42dfc7aceb7e3476d28210cde8c`.
+`wlterm-core`, `wlterm-ui`, and `wlterm-waybar` own only repository-local
+configuration and presentation state.
+
+See [Presentation model ownership](docs/reference/presentation-model.md).
 
 ## Development
 
-Use the shared target directory for local validation:
-
 ```bash
-export CARGO_TARGET_DIR=/home/paydro/.cache/d2b-wlterm-target
 cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 nix flake check
 ```
 
-Inside a Niri/Wayland session, generate a deterministic review image without
-contacting d2bd or enabling actions:
+Generate a deterministic review image inside a Niri/Wayland session:
 
 ```bash
 cargo run -p wlterm-cli -- render-sample ./wlterm-control-center.png
 ```
 
-The command uses the production Quickshell QML tree, requires `quickshell` and
-the Material Symbols font (both are in `nix develop`), and validates a
-420x720 physical-pixel, non-uniform PNG smaller than 5 MB at any output scale.
-Generated images are not tracked.
+## Flake and Home Manager
 
-## Flake inputs
-
-This release pins d2b-toolkit 0.2.0 at
-`v0.2.0` (resolved by the lock file to
-`fde6af8b842718e7150f5056d4eba73093d4ad77`). Consumers should keep one toolkit
-and nixpkgs revision across desktop companions:
+Until the deferred GitHub repository rename completes, the input name is the
+new `d2b-client-toolkit` name while its URL uses the existing toolkit
+repository:
 
 ```nix
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-    d2b = {
-      url = "github:vicondoa/d2b";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
-    d2b-toolkit = {
-      url = "github:vicondoa/d2b-toolkit/v0.2.0";
+    d2b-client-toolkit = {
+      url = "github:vicondoa/d2b-toolkit/926de54e7320599c373524a10b65aaf13b6ff422";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
     d2b-wlterm = {
-      url = "github:vicondoa/d2b-wlterm/v0.2.0";
+      url = "github:vicondoa/d2b-wlterm";
       inputs.nixpkgs.follows = "nixpkgs";
-      inputs.d2b-toolkit.follows = "d2b-toolkit";
-    };
-
-    weezterm = {
-      url = "github:vicondoa/weezterm";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.d2b-toolkit.follows = "d2b-toolkit";
+      inputs.d2b-client-toolkit.follows = "d2b-client-toolkit";
     };
   };
-}
-```
 
-The flake exports `packages.${system}.default`, `apps.${system}.default`,
-`homeManagerModules.default`, and package/Home Manager checks.
-
-## Home Manager
-
-```nix
-{
-  imports = [ inputs.d2b-wlterm.homeManagerModules.default ];
-
-  programs.d2b-wlterm = {
-    enable = true;
-    publicSocketPath = "/run/d2b/public.sock";
-    weztermCommand = [
-      "${inputs.weezterm.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/wezterm"
-      "start"
-      "--"
+  outputs = { d2b-wlterm, ... }: {
+    homeModules = [
+      d2b-wlterm.homeManagerModules.default
+      {
+        programs.d2b-wlterm = {
+          enable = true;
+          waybar.enable = true;
+          quickshell.enable = true;
+        };
+      }
     ];
-    waylandProxyCommand = [ "d2b-wayland-proxy" ];
-    waybar.enable = true;
-    quickshell.enable = true;
   };
 }
 ```
 
-The module writes only user configuration. Inventory and shell operations use
-the public daemon socket; the launcher never reads bundle artifacts, root state,
-the broker socket, or the private unsafe-local helper transport.
+The module owns the user package and files under
+`$XDG_CONFIG_HOME/d2b-wlterm`. It does not read host-private d2b state or own
+daemon, session, helper, or Wayland services.

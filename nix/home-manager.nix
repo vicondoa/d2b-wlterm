@@ -46,12 +46,6 @@ let
   quickshellSurface = {
     command = if cfg.package != null then [ (lib.getExe cfg.package) "control-center" ] else [ "d2b-wlterm" "control-center" ];
     statePath = cfg.quickshell.controlCenterStatePath;
-    actions = {
-      create = [ "d2b-wlterm" "create" ];
-      open = [ "d2b-wlterm" "open" ];
-      detach = [ "d2b-wlterm" "detach" ];
-      stop = [ "d2b-wlterm" "stop" ];
-    };
   };
 in
 {
@@ -80,7 +74,7 @@ in
     waylandProxyCommand = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ "d2b-wayland-proxy" ];
-      description = "Command prefix for the d2b Wayland proxy used to wrap WeezTerm windows with VM identity rails.";
+      description = "Reserved command prefix for the canonical Wayland control adapter.";
     };
 
     refreshIntervalSeconds = lib.mkOption {

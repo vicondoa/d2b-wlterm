@@ -23,10 +23,9 @@ enable = false
 control_center_state_path = "$XDG_RUNTIME_DIR/d2b-wlterm/control-center.json"
 ```
 
-`wezterm_command` is the only supported terminal backend.
-`wayland_proxy_command` must name a d2b-wayland-proxy build with typed readiness
-support. `create` and `open` wait for first-client readiness; failure terminates
-the proxy and never starts WezTerm directly.
+`wezterm_command` and `wayland_proxy_command` are reserved for the canonical
+terminal and Wayland service adapters. This source cut does not execute either
+command.
 
 `ui.default_open_behavior` accepts:
 
@@ -38,10 +37,9 @@ the proxy and never starts WezTerm directly.
 `silent`. Async d2b client failures include a bounded trace/correlation id and
 must not display raw shell names, opaque daemon handles, or terminal bytes.
 
-Unavailable workloads remain visible. Cards include provider kind, isolation
-posture, session persistence, availability, and typed remediation. Unsafe-local
-cards warn that they provide no isolation and remain disabled unless
-`unsafe-local-shell-v1` was negotiated.
+Presentation cards include provider kind, isolation posture, session
+persistence, availability, and typed remediation when a canonical adapter
+supplies those values.
 
 Waybar output is a JSON custom-module payload with `text`, `tooltip`, and
 `class`. The tooltip includes an explicit no-isolation warning when unsafe-local
@@ -53,6 +51,6 @@ available actions, active-shell counts, and safe async-error data.
 
 ## Flake/Home Manager coverage
 
-The flake's package and Home Manager checks use release version 0.2.0. The
+The flake's package and Home Manager checks use release version 2.0.0. The
 module check evaluates generated TOML, Waybar, and Quickshell output without
 starting d2b.
