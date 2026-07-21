@@ -8,8 +8,8 @@ The repository currently provides its presentation reducer, Waybar output,
 Quickshell control center, deterministic review renderer, CLI package, and Home
 Manager module. Authenticated discovery and shell management use the frozen
 service facade. Interactive desktop stream routing remains fail-closed until
-its W8 route is available. There is no legacy public-JSON, SSH, helper-socket,
-or direct-compositor fallback.
+its canonical desktop route is available. There is no legacy public-JSON, SSH,
+helper-socket, or direct-compositor fallback.
 
 ## Source ownership
 

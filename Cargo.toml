@@ -14,8 +14,8 @@ wlterm-core = { path = "crates/wlterm-core" }
 wlterm-d2b = { path = "crates/wlterm-d2b" }
 wlterm-waybar = { path = "crates/wlterm-waybar" }
 wlterm-ui = { path = "crates/wlterm-ui" }
-d2b-client-toolkit = { path = "../d2b-client-toolkit/crates/d2b-client-toolkit", version = "=2.0.0", features = ["host-socket"] }
-nix = { version = "0.29", default-features = false, features = ["socket", "user"] }
+d2b-client-toolkit = { git = "https://github.com/vicondoa/d2b-toolkit", rev = "926de54e7320599c373524a10b65aaf13b6ff422", version = "=2.0.0", features = ["host-socket"] }
+nix = { version = "0.29", default-features = false, features = ["socket", "user", "poll"] }
 protobuf = "3.7"
 tokio = { version = "1", features = ["rt", "time"] }
 petname = "2.0"

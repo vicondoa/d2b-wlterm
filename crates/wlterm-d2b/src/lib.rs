@@ -2,9 +2,10 @@
 
 use std::{
     fmt,
-    os::fd::{AsRawFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, OwnedFd},
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
 
 use d2b_client_toolkit::contracts::{
@@ -23,7 +24,11 @@ use d2b_client_toolkit::{
     ServiceKind, ServiceOwner, TargetInput, TransportKind, TransportSelection,
 };
 use nix::{
-    sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, UnixAddr},
+    errno::Errno,
+    poll::{poll, PollFd, PollFlags, PollTimeout},
+    sys::socket::{
+        connect, getsockopt, socket, sockopt, AddressFamily, SockFlag, SockType, UnixAddr,
+    },
     unistd::{Gid, Uid, User},
 };
 use protobuf::EnumOrUnknown;
@@ -41,6 +46,14 @@ pub use d2b_client_toolkit::{
 const LIVE_ROUTING_UNAVAILABLE: &str =
     "authenticated shell stream routing is unavailable until the desktop route is frozen";
 static OPERATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+/// Bound on the total time spent completing a non-blocking `connect(2)` to the
+/// local d2b endpoint, covering both an in-progress handshake (`EINPROGRESS`)
+/// and a transiently full listen backlog (`EAGAIN`).
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+/// Backoff between retrying `connect(2)` after `EAGAIN`; the accept backlog is
+/// expected to drain within a handful of milliseconds under normal load.
+const CONNECT_RETRY_BACKOFF: Duration = Duration::from_millis(2);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct D2bClientConfig {
@@ -243,8 +256,61 @@ fn connect_seqpacket(path: &str) -> Result<OwnedFd, D2bClientError> {
     )
     .map_err(|_| D2bClientError::Connect)?;
     let address = UnixAddr::new(Path::new(path)).map_err(|_| D2bClientError::Connect)?;
-    connect(fd.as_raw_fd(), &address).map_err(|_| D2bClientError::Connect)?;
-    Ok(fd)
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+
+    loop {
+        match connect(fd.as_raw_fd(), &address) {
+            Ok(()) => return Ok(fd),
+            Err(Errno::EINTR) => continue,
+            // A non-blocking connect to a local socket may report the
+            // handshake as still in progress; wait for the fd to become
+            // writable, then read back the real completion status.
+            Err(Errno::EINPROGRESS) => {
+                wait_connect_writable(&fd, deadline)?;
+                return finish_connect(fd);
+            }
+            // AF_UNIX SOCK_SEQPACKET connect can return EAGAIN when the
+            // listener's accept backlog is momentarily full rather than when
+            // the peer is unreachable; retry with a bounded backoff instead
+            // of failing the whole connection attempt immediately.
+            Err(Errno::EAGAIN) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(D2bClientError::Connect);
+                }
+                std::thread::sleep(CONNECT_RETRY_BACKOFF.min(remaining));
+                continue;
+            }
+            Err(_) => return Err(D2bClientError::Connect),
+        }
+    }
+}
+
+fn wait_connect_writable(fd: &OwnedFd, deadline: Instant) -> Result<(), D2bClientError> {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(D2bClientError::Connect);
+        }
+        let timeout = PollTimeout::try_from(remaining).unwrap_or(PollTimeout::MAX);
+        let mut fds = [PollFd::new(fd.as_fd(), PollFlags::POLLOUT)];
+        match poll(&mut fds, timeout) {
+            Ok(0) => return Err(D2bClientError::Connect),
+            Ok(_) => return Ok(()),
+            Err(Errno::EINTR) => continue,
+            Err(_) => return Err(D2bClientError::Connect),
+        }
+    }
+}
+
+fn finish_connect(fd: OwnedFd) -> Result<OwnedFd, D2bClientError> {
+    let pending_error =
+        getsockopt(&fd, sockopt::SocketError).map_err(|_| D2bClientError::Connect)?;
+    if pending_error == 0 {
+        Ok(fd)
+    } else {
+        Err(D2bClientError::Connect)
+    }
 }
 
 pub fn shell_selection(action: ShellAction, shell_handle: &str, force: bool) -> TerminalSelection {
@@ -469,5 +535,91 @@ mod tests {
             boundary.open_shell_blocking("work.local-root.d2b", None, false),
             Err(D2bClientError::LiveRoutingUnavailable)
         ));
+    }
+
+    /// Regression coverage for the `connect_seqpacket` EAGAIN/EINPROGRESS
+    /// handling: bind a real `SOCK_SEQPACKET` listener with a backlog far
+    /// smaller than the number of concurrent connect attempts, and assert
+    /// every attempt still completes once the acceptor drains the backlog,
+    /// instead of failing on the first transient `EAGAIN`.
+    #[test]
+    fn connect_seqpacket_retries_past_backlog_contention() {
+        use nix::sys::socket::{accept, bind, listen, Backlog};
+        use std::os::fd::FromRawFd;
+        use std::sync::atomic::AtomicUsize;
+
+        static PATH_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("crates/<name> manifest dir has a workspace root")
+            .to_path_buf();
+        let socket_path = workspace_root.join("target").join(format!(
+            "wt-{}-{}.sock",
+            std::process::id(),
+            PATH_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&socket_path);
+
+        let listener = socket(
+            AddressFamily::Unix,
+            SockType::SeqPacket,
+            SockFlag::SOCK_CLOEXEC,
+            None,
+        )
+        .expect("create listener socket");
+        let address = UnixAddr::new(socket_path.as_path()).expect("listener path fits sun_path");
+        bind(listener.as_raw_fd(), &address).expect("bind listener");
+        listen(&listener, Backlog::new(1).expect("valid backlog")).expect("listen");
+
+        const CLIENTS: usize = 8;
+        let acceptor = std::thread::spawn({
+            let listener_fd = listener.as_raw_fd();
+            move || {
+                let mut accepted = Vec::with_capacity(CLIENTS);
+                for _ in 0..CLIENTS {
+                    loop {
+                        match accept(listener_fd) {
+                            Ok(fd) => {
+                                // SAFETY: `accept` returns a freshly opened,
+                                // uniquely owned descriptor.
+                                accepted.push(unsafe { OwnedFd::from_raw_fd(fd) });
+                                break;
+                            }
+                            Err(Errno::EINTR) => continue,
+                            Err(Errno::EAGAIN) => {
+                                std::thread::sleep(Duration::from_millis(1));
+                                continue;
+                            }
+                            Err(error) => panic!("accept failed: {error}"),
+                        }
+                    }
+                }
+                accepted
+            }
+        });
+
+        let path_string = socket_path.to_str().expect("utf8 socket path").to_owned();
+        let clients: Vec<_> = (0..CLIENTS)
+            .map(|_| {
+                let path = path_string.clone();
+                std::thread::spawn(move || connect_seqpacket(&path))
+            })
+            .collect();
+
+        let results: Vec<_> = clients
+            .into_iter()
+            .map(|handle| handle.join().expect("client thread"))
+            .collect();
+        let accepted = acceptor.join().expect("acceptor thread");
+
+        let _ = std::fs::remove_file(&socket_path);
+
+        assert_eq!(accepted.len(), CLIENTS);
+        assert!(
+            results.iter().all(Result::is_ok),
+            "every connect_seqpacket call should succeed once the backlog drains: {results:?}"
+        );
     }
 }

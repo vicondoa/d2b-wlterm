@@ -10,6 +10,6 @@ Presentation commands remain available:
 
 The client adapter uses authenticated ComponentSession discovery and canonical
 terminal selections for list, detach, and kill. Interactive `create` and `open`
-remain fail-closed until the W8 desktop route can carry the terminal stream.
-No command uses the removed public-JSON protocol, copied fixtures, SSH, a host
-shell, or direct Wayland control.
+remain fail-closed until the canonical desktop route can carry the terminal
+stream. No command uses the removed public-JSON protocol, copied fixtures,
+SSH, a host shell, or direct Wayland control.
