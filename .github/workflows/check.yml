@@ -13,7 +13,7 @@ jobs:
       - name: Checkout pinned client toolkit
         run: |
           git clone https://github.com/vicondoa/d2b-toolkit ../d2b-client-toolkit
-          git -C ../d2b-client-toolkit checkout 3d6b75d47c8df66c1722ea324d64334a127d43ec
+          git -C ../d2b-client-toolkit checkout 926de54e7320599c373524a10b65aaf13b6ff422
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt

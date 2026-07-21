@@ -17,6 +17,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Repinned the client toolkit checkout, flake input, and release-metadata
+  assertions to the toolkit's final W9 PR head (a CI/changelog-only revision);
+  the canonical d2b source revision and fingerprint are unchanged.
 - Aligned CI and Home Manager guidance with the frozen W9 client toolkit
   revision used by Cargo and the flake.
 - Pinned the frozen W6 client toolkit and migrated workload discovery plus

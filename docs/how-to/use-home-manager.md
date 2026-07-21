@@ -8,7 +8,7 @@ Pin the canonical client distribution and import the module:
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     d2b-client-toolkit = {
-      url = "github:vicondoa/d2b-toolkit/3d6b75d47c8df66c1722ea324d64334a127d43ec";
+      url = "github:vicondoa/d2b-toolkit/926de54e7320599c373524a10b65aaf13b6ff422";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 

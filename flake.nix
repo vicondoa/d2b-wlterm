@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     d2b-client-toolkit = {
-      url = "github:vicondoa/d2b-toolkit/3d6b75d47c8df66c1722ea324d64334a127d43ec";
+      url = "github:vicondoa/d2b-toolkit/926de54e7320599c373524a10b65aaf13b6ff422";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -109,10 +109,10 @@
           package = self.packages.${system}.default;
           release-metadata = pkgs.runCommand "d2b-wlterm-release-metadata-${version}" { } ''
             grep -Fq 'version = "2.0.0"' ${./Cargo.toml}
-            grep -Fq 'revision = "3d6b75d47c8df66c1722ea324d64334a127d43ec"' ${./Cargo.toml}
+            grep -Fq 'revision = "926de54e7320599c373524a10b65aaf13b6ff422"' ${./Cargo.toml}
             grep -Fq 'd2b-source-revision = "9dc902243cdd7aba7ef269988b96f0aae6e037da"' ${./Cargo.toml}
             grep -Fq 'source-inventory-sha256 = "35c33c2e23e1b9f03b5abc3bbca2d3320e38c42dfc7aceb7e3476d28210cde8c"' ${./Cargo.toml}
-            grep -Fq '3d6b75d47c8df66c1722ea324d64334a127d43ec' ${./flake.lock}
+            grep -Fq '926de54e7320599c373524a10b65aaf13b6ff422' ${./flake.lock}
             touch $out
           '';
           home-manager-module = pkgs.runCommand "d2b-wlterm-home-manager-module-${version}" { } ''
