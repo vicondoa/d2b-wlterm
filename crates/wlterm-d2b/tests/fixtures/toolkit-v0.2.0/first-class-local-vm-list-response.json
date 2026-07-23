@@ -1,0 +1,41 @@
+{
+  "type": "workloadResponse",
+  "op": "list",
+  "result": {
+    "workloads": [
+      {
+        "identity": {
+          "workloadId": "builder",
+          "workloadName": "Build VM",
+          "realmId": "dev",
+          "realmPath": ["dev"],
+          "canonicalTarget": "builder.dev.d2b",
+          "runtimeKind": "nixos",
+          "providerId": "local-cloud-hypervisor"
+        },
+        "providerKind": "local-vm",
+        "state": "stopped",
+        "executionPosture": {
+          "isolation": "virtual-machine",
+          "environment": "runtime-managed",
+          "displayEnvironment": "not-applicable",
+          "executionIdentity": "workload-user",
+          "sessionPersistence": "runtime-managed"
+        },
+        "availability": "ready",
+        "graphicalPosture": "not-applicable",
+        "capabilities": ["configured-launch"],
+        "launcherItems": [
+          {
+            "id": "build",
+            "name": "Build",
+            "icon": {},
+            "type": "exec",
+            "graphical": false,
+            "capabilities": ["configured-launch"]
+          }
+        ]
+      }
+    ]
+  }
+}
