@@ -106,7 +106,7 @@ pub enum AsyncErrorDisplay {
     Silent,
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SafeCorrelation(String);
 
@@ -140,7 +140,7 @@ impl fmt::Debug for SafeCorrelation {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TargetId(String);
 
@@ -150,9 +150,8 @@ impl TargetId {
         if value.trim().is_empty() {
             return Err(ModelError::EmptyTargetId);
         }
-        if value.len() > 255 || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
-            return Err(ModelError::InvalidTargetId);
-        }
+        d2b_toolkit_core::workload::validate_shell_target(&value)
+            .map_err(|_| ModelError::InvalidTargetId)?;
         Ok(Self(value))
     }
 
@@ -161,7 +160,7 @@ impl TargetId {
     }
 
     pub fn is_canonical(&self) -> bool {
-        self.0.ends_with(".d2b") && self.0.split('.').count() >= 3
+        d2b_toolkit_core::WorkloadTarget::parse(&self.0).is_ok()
     }
 }
 
@@ -177,7 +176,7 @@ impl fmt::Debug for TargetId {
 /// canonical target, including first-class local VMs and unsafe-local providers.
 pub type VmId = TargetId;
 
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SessionId(String);
 
@@ -201,7 +200,7 @@ impl SessionId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TargetPowerState {
     Online,
@@ -218,7 +217,7 @@ impl TargetPowerState {
 
 pub type VmPowerState = TargetPowerState;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderKind {
     #[default]
@@ -243,7 +242,7 @@ impl ProviderKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum IsolationPosture {
     #[default]
@@ -269,7 +268,7 @@ impl IsolationPosture {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionPersistence {
     #[default]
@@ -286,7 +285,7 @@ impl SessionPersistence {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TargetAvailability {
     #[default]
@@ -350,7 +349,7 @@ impl TargetAvailability {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RemediationKind {
     UpdateD2b,
@@ -369,14 +368,18 @@ pub struct TargetRemediation {
     pub message: &'static str,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ShellLauncherItem {
     pub id: String,
     pub name: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+fn default_shell_feature_available() -> bool {
+    true
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ShellVisualState {
     Detached,
@@ -394,7 +397,7 @@ impl ShellVisualState {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ShellSession {
     pub name: FriendlyName,
@@ -455,12 +458,90 @@ pub struct WorkloadSummary {
     pub session_persistence: SessionPersistence,
     #[serde(default)]
     pub availability: TargetAvailability,
+    #[serde(default = "default_shell_feature_available")]
     pub shell_feature_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_launcher_item: Option<ShellLauncherItem>,
     pub power_state: VmPowerState,
     #[serde(default)]
     pub sessions: Vec<ShellSession>,
+}
+
+impl<'de> Deserialize<'de> for WorkloadSummary {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Wire {
+            #[serde(default)]
+            target: Option<TargetId>,
+            #[serde(default)]
+            id: Option<VmId>,
+            #[serde(default)]
+            canonical_target: Option<String>,
+            #[serde(default)]
+            legacy_vm_name: Option<String>,
+            #[serde(default)]
+            workload_name: Option<String>,
+            #[serde(default)]
+            provider_kind: ProviderKind,
+            #[serde(default)]
+            isolation_posture: IsolationPosture,
+            #[serde(default)]
+            session_persistence: SessionPersistence,
+            #[serde(default)]
+            availability: TargetAvailability,
+            #[serde(default = "default_shell_feature_available")]
+            shell_feature_available: bool,
+            #[serde(default)]
+            shell_launcher_item: Option<ShellLauncherItem>,
+            #[serde(default)]
+            power_state: VmPowerState,
+            #[serde(default)]
+            sessions: Vec<ShellSession>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let canonical = wire
+            .canonical_target
+            .as_deref()
+            .map(TargetId::new)
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+        let target = wire
+            .target
+            .or(canonical)
+            .or_else(|| wire.id.clone())
+            .ok_or_else(|| serde::de::Error::custom("workload target is required"))?;
+        let id = wire.id.unwrap_or_else(|| {
+            wire.legacy_vm_name
+                .as_deref()
+                .and_then(|legacy| TargetId::new(legacy).ok())
+                .unwrap_or_else(|| target.clone())
+        });
+        let legacy_vm_name = wire
+            .legacy_vm_name
+            .or_else(|| (id != target && !id.is_canonical()).then(|| id.as_str().to_string()));
+        let canonical_target = target.is_canonical().then(|| target.as_str().to_string());
+
+        Ok(Self {
+            target,
+            id,
+            canonical_target,
+            legacy_vm_name,
+            workload_name: wire.workload_name,
+            provider_kind: wire.provider_kind,
+            isolation_posture: wire.isolation_posture,
+            session_persistence: wire.session_persistence,
+            availability: wire.availability,
+            shell_feature_available: wire.shell_feature_available,
+            shell_launcher_item: wire.shell_launcher_item,
+            power_state: wire.power_state,
+            sessions: wire.sessions,
+        })
+    }
 }
 
 impl WorkloadSummary {
@@ -1169,7 +1250,18 @@ mod tests {
     }
 
     #[test]
-    fn presentation_model_serializes_compatibility_aliases() {
+    fn canonical_target_model_preserves_legacy_vm_serde_defaults() {
+        let legacy: WorkloadSummary = serde_json::from_value(serde_json::json!({
+            "id": "work",
+            "powerState": "online",
+            "sessions": []
+        }))
+        .expect("legacy 0.1 summary");
+        assert_eq!(legacy.target.as_str(), "work");
+        assert_eq!(legacy.id.as_str(), "work");
+        assert_eq!(legacy.provider_kind, ProviderKind::LocalVm);
+        assert!(legacy.shell_feature_available);
+
         let summary = WorkloadSummary::discovered(
             TargetId::new("builder.dev.d2b").unwrap(),
             TargetId::new("builder").unwrap(),

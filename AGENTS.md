@@ -17,9 +17,8 @@ nix flake check
 
 ## Integration notes
 
-- Pin `d2b-client-toolkit` and its canonical d2b source exactly. Keep
-  repository-local types presentation-only; do not copy protocol DTOs or
-  fixtures while service adapters are pending.
+- Depend on `d2b-toolkit` through a local path when that sibling repository is
+  available, but keep this skeleton buildable without it.
 - Do not make the Home Manager module depend on host-private d2b state. It should
   render user config and invoke the installed CLI only.
 - Keep Stop confirmation, already-attached Open, and async errors explicit in the
